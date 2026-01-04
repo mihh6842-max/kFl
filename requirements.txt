@@ -1,0 +1,43 @@
+# ===== CORE DEPENDENCIES =====
+# Telegram Bot API
+python-telegram-bot==20.7
+aiogram==3.3.0
+
+# HTTP requests
+requests==2.31.0
+
+# Environment variables
+python-dotenv==1.0.0
+
+# Task scheduling
+APScheduler>=3.10.0
+
+# ===== DATABASE =====
+# Async SQLite
+aiosqlite>=0.19.0
+
+# ===== PAYMENT PROCESSING =====
+# YooKassa integration
+yookassa>=3.0.0
+
+# ===== GOOGLE INTEGRATION =====
+# Google Sheets API
+gspread>=5.12.0
+google-auth>=2.23.0
+
+# ===== TRANSLATION =====
+# Multilingual support
+deep-translator==1.11.4
+
+# ===== DOCUMENT PROCESSING =====
+# PDF/EPUB readers for recipe books
+PyPDF2==3.0.1
+ebooklib==0.18
+beautifulsoup4==4.12.2
+lxml==4.9.3
+pdfplumber==0.10.3
+
+# ===== TYPE CHECKING (Dev) =====
+# For development only
+# mypy>=1.0.0
+# pylint>=2.17.0
