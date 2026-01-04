@@ -39,12 +39,12 @@ def load_env():
 env = load_env()
 
 # ======================== КОНФИГ ========================
-BOT_TOKEN = env.get('BOT_TOKEN', "8379357573:AAGI7G4U9Uon1-CtcweaPBP9PImZjtBFniU")
+BOT_TOKEN = env.get('BOT_TOKEN', "8442031806:AAFGnTvEEHLc92mPl5VJRJeOhpXbeNyEObI")
 YOOKASSA_SHOP_ID = env.get('YOOKASSA_SHOP_ID', "1024866")
 YOOKASSA_SECRET_KEY = env.get('YOOKASSA_SECRET_KEY', "live_62wmjnZ9ytjqZonaLiNw3gpsQjUKPbD-lBrTPK1Z38Y")
-CHANNEL_ID = -1003592079500  # Канал КЛС
+CHANNEL_ID = -1002284489725  # Группа КЛС
 FALLBACK_CHANNEL_LINK = "https://t.me/+iD8NwG9tfakwNzJi"  # Запасная ссылка
-ADMIN_IDS = [7338817463, 1478525032]
+ADMIN_IDS = [7338817463, 1478525032, 870227242]
 PRICE_1_MONTH = 2222  # Стандартная цена для новых пользователей
 AUTO_BROADCAST_ENABLED = True  # Автоматическая рассылка вкл/выкл
 DB_PATH = 'data/bot.db'  # Путь к базе данных
@@ -309,6 +309,25 @@ def clean_markdown(text: str) -> str:
 
     return text
 
+def fix_name_declension(text: str, name: str) -> str:
+    """Исправляет склонения имени - заменяет все падежные формы на именительный падеж"""
+    if not name:
+        return text
+
+    # Типичные окончания для склонения имён
+    # Для женских имён на -а: Анна -> Анне, Анны, Анну, Анной
+    # Для мужских имён: Иван -> Ивану, Ивана, Иваном
+
+    # Создаём регулярку которая ловит имя с любыми окончаниями
+    # Берём основу имени (убираем последние 1-2 буквы)
+    if len(name) > 3:
+        base = name[:-1]  # Основа без последней буквы
+        # Ищем базу + любые окончания и заменяем на полное имя
+        pattern = rf'\b{re.escape(base)}[а-яё]{{0,2}}\b'
+        text = re.sub(pattern, name, text, flags=re.IGNORECASE)
+
+    return text
+
 async def generate_ai_message(prompt: str, context: str = "", clean_md: bool = True) -> str:
     """Генерирует сообщение через Gemma AI с экспертизой по лыжному спорту"""
     try:
@@ -509,7 +528,7 @@ def build_smart_prompt(category: str, profile: dict, context: dict) -> str:
 
     # Базовые правила грамматики
     base_rules = f"""СТРОГИЕ ПРАВИЛА:
-1. Обращайся к {name} правильно по падежам.
+1. Обращайся к человеку по имени.
 2. НЕ упоминай возраст.
 3. Живой разговорный язык, как друг.
 4. Без канцеляризмов и маркетинговых штампов.
@@ -815,6 +834,10 @@ async def generate_subscription_promo(profile: dict = None, user_id: int = None)
     logging.info(f"[BROADCAST] User {user_id}: category={category}")
 
     msg = await generate_ai_message(prompt)
+
+    # Исправляем склонения имени
+    if msg and profile.get('name'):
+        msg = fix_name_declension(msg, profile['name'])
 
     if msg:
         # 20 разных призывов к действию для максимального разнообразия
@@ -1905,8 +1928,6 @@ def admin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🤖 AI Рассылка (без подписки)", callback_data="ai_broadcast")],
         [InlineKeyboardButton(text=broadcast_status, callback_data="toggle_auto_broadcast")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
-        [InlineKeyboardButton(text="📄 Загрузить PDF (Тренировки)", callback_data="upload_pdf")],
-        [InlineKeyboardButton(text="🎥 Загрузить видео (Лекции)", callback_data="upload_video")],
         [InlineKeyboardButton(text="📚 Просмотр контента", callback_data="view_content")],
         [InlineKeyboardButton(text="📊 Экспорт в Google Таблицы", callback_data="export_menu")],
         [InlineKeyboardButton(text="🎬 Приветственное медиа", callback_data="change_welcome_media")],
