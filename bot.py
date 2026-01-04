@@ -45,7 +45,7 @@ YOOKASSA_SECRET_KEY = env.get('YOOKASSA_SECRET_KEY', "live_62wmjnZ9ytjqZonaLiNw3
 CHANNEL_ID = -1003592079500  # Канал КЛС
 FALLBACK_CHANNEL_LINK = "https://t.me/+iD8NwG9tfakwNzJi"  # Запасная ссылка
 ADMIN_IDS = [7338817463, 1478525032]
-PRICE_1_MONTH = 1  # Для тестирования, потом поменять через админку
+PRICE_1_MONTH = 2222  # Стандартная цена для новых пользователей
 AUTO_BROADCAST_ENABLED = True  # Автоматическая рассылка вкл/выкл
 DB_PATH = 'data/bot.db'  # Путь к базе данных
 GOOGLE_SHEETS_URL = env.get('GOOGLE_SHEETS_URL', '')
@@ -1081,8 +1081,12 @@ async def update_phone(user_id: int, phone: str):
 
 async def activate_subscription(user_id: int, days: int = 30):
     sub_until = int((datetime.now() + timedelta(days=days)).timestamp())
+    grace_until = sub_until + 7 * 24 * 3600  # +7 дней для сохранения цены
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('UPDATE users SET subscription_until = ? WHERE user_id = ?', (sub_until, user_id))
+        await db.execute(
+            'UPDATE users SET subscription_until = ?, grace_period_until = ? WHERE user_id = ?',
+            (sub_until, grace_until, user_id)
+        )
         await db.commit()
     
     try:
@@ -2486,6 +2490,15 @@ async def check_payment(payment_id: str, user_id: int, max_checks: int = 60):
             # Обернем синхронный вызов в asyncio.to_thread
             payment = await asyncio.to_thread(Payment.find_one, payment_id)
             if payment.status == 'succeeded':
+                # Сохраняем цену которую заплатил пользователь как special_price
+                paid_amount = int(payment.amount.value)
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        'UPDATE users SET special_price = ? WHERE user_id = ? AND special_price IS NULL',
+                        (paid_amount, user_id)
+                    )
+                    await db.commit()
+
                 await activate_subscription(user_id, 30)
 
                 async with aiosqlite.connect(DB_PATH) as db:
