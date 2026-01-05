@@ -2814,15 +2814,14 @@ async def profile_button(message: Message):
         f"💰 Заработано: {earnings:.2f}₽"
     )
 
-    # Кнопка вывода доступна только если есть заработок
-    if earnings >= 100:
-        profile_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💸 Вывод средств", callback_data="request_withdrawal")]
-        ])
-        await message.answer(profile_text, parse_mode="HTML", reply_markup=profile_kb)
-    else:
-        min_amount_text = f"\n\n<i>💡 Минимальная сумма для вывода: 100₽</i>"
-        await message.answer(profile_text + min_amount_text, parse_mode="HTML")
+    profile_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💸 Вывод средств", callback_data="request_withdrawal")]
+    ])
+
+    if earnings < 100:
+        profile_text += f"\n\n<i>💡 Минимальная сумма для вывода: 100₽</i>"
+
+    await message.answer(profile_text, parse_mode="HTML", reply_markup=profile_kb)
 
 @router.callback_query(F.data == "request_withdrawal")
 async def withdrawal_request(callback: CallbackQuery, state: FSMContext):
