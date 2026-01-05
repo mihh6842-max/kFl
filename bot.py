@@ -43,10 +43,19 @@ env = load_env()
 # Расшифровываем токен из .env
 encrypted_token = env.get('BOT_TOKEN_ENCRYPTED')
 if encrypted_token:
-    BOT_TOKEN = decrypt_token(encrypted_token)
+    try:
+        BOT_TOKEN = decrypt_token(encrypted_token)
+        print(f"Token decrypted successfully: {BOT_TOKEN[:10]}...")
+    except Exception as e:
+        print(f"Decryption error: {e}")
+        # Fallback на старый формат
+        BOT_TOKEN = env.get('BOT_TOKEN', "")
 else:
     # Fallback на старый формат (если не зашифрован)
     BOT_TOKEN = env.get('BOT_TOKEN', "")
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN not found in .env file!")
 YOOKASSA_SHOP_ID = env.get('YOOKASSA_SHOP_ID', "1024866")
 YOOKASSA_SECRET_KEY = env.get('YOOKASSA_SECRET_KEY', "live_62wmjnZ9ytjqZonaLiNw3gpsQjUKPbD-lBrTPK1Z38Y")
 CHANNEL_ID = -1002284489725  # Группа КЛС
