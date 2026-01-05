@@ -21,6 +21,7 @@ import os
 import PyPDF2
 import io
 import google_sheets
+from crypto_helper import decrypt_token
 
 # ======================== ЗАГРУЗКА .ENV ========================
 def load_env():
@@ -39,12 +40,18 @@ def load_env():
 env = load_env()
 
 # ======================== КОНФИГ ========================
-BOT_TOKEN = env.get('BOT_TOKEN', "8576168614:AAEfCUkIo347_6uN9aXEqEa_VzAocdeRCzk")
+# Расшифровываем токен из .env
+encrypted_token = env.get('BOT_TOKEN_ENCRYPTED')
+if encrypted_token:
+    BOT_TOKEN = decrypt_token(encrypted_token)
+else:
+    # Fallback на старый формат (если не зашифрован)
+    BOT_TOKEN = env.get('BOT_TOKEN', "")
 YOOKASSA_SHOP_ID = env.get('YOOKASSA_SHOP_ID', "1024866")
 YOOKASSA_SECRET_KEY = env.get('YOOKASSA_SECRET_KEY', "live_62wmjnZ9ytjqZonaLiNw3gpsQjUKPbD-lBrTPK1Z38Y")
 CHANNEL_ID = -1002284489725  # Группа КЛС
 FALLBACK_CHANNEL_LINK = "https://t.me/+iD8NwG9tfakwNzJi"  # Запасная ссылка
-ADMIN_IDS = [7338817463, 1478525032, 853335233]
+ADMIN_IDS = [7338817463, 1478525032, 870227242]
 PRICE_1_MONTH = 2222  # Стандартная цена для новых пользователей
 AUTO_BROADCAST_ENABLED = True  # Автоматическая рассылка вкл/выкл
 BROADCAST_INTERVAL_HOURS = 10  # Интервал авто-рассылки в часах
@@ -84,6 +91,9 @@ class PhoneState(StatesGroup):
 
 class WithdrawalState(StatesGroup):
     waiting_details = State()
+
+class SetPriceState(StatesGroup):
+    waiting_user_list = State()
 
 class ContentUpload(StatesGroup):
     waiting_pdf_category = State()
@@ -2085,6 +2095,7 @@ def admin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"⏰ Интервал: {BROADCAST_INTERVAL_HOURS}ч", callback_data="set_broadcast_interval")],
         [InlineKeyboardButton(text="👁 Превью рассылки (мне)", callback_data="preview_broadcast_me")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
+        [InlineKeyboardButton(text="💰 Установить цену 1111₽", callback_data="set_special_price")],
         [InlineKeyboardButton(text="📚 Просмотр контента", callback_data="view_content")],
         [InlineKeyboardButton(text="📊 Экспорт в Google Таблицы", callback_data="export_menu")],
         [InlineKeyboardButton(text="🎬 Приветственное медиа", callback_data="change_welcome_media")],
@@ -3864,6 +3875,65 @@ class SubscriptionSettings(StatesGroup):
     waiting_channel_link = State()
     waiting_paid_video = State()
     waiting_secret_word = State()
+
+@router.callback_query(F.data == "set_special_price")
+async def set_special_price_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+
+    await state.set_state(SetPriceState.waiting_user_list)
+    await callback.message.answer(
+        "💰 <b>Установка специальной цены 1111₽</b>\n\n"
+        "Отправьте список User ID построчно в формате:\n\n"
+        "<code>User id: 670030071\n"
+        "User id: 342534630\n"
+        "User id: 463485998</code>\n\n"
+        "Или просто ID через строку:\n"
+        "<code>670030071\n"
+        "342534630\n"
+        "463485998</code>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(SetPriceState.waiting_user_list)
+async def process_special_price_list(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+
+    text = message.text.strip()
+
+    # Извлекаем все числа (user_id) из текста
+    import re
+    user_ids = re.findall(r'\d{6,}', text)
+
+    if not user_ids:
+        await message.answer("❌ Не найдено ни одного User ID. Попробуйте снова.")
+        return
+
+    # Устанавливаем специальную цену для всех пользователей
+    grace_until = int((datetime.now() + timedelta(days=365)).timestamp())
+    updated = 0
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        for user_id_str in user_ids:
+            user_id = int(user_id_str)
+            await db.execute(
+                'UPDATE users SET special_price = ?, grace_period_until = ? WHERE user_id = ?',
+                (1111, grace_until, user_id)
+            )
+            updated += 1
+        await db.commit()
+
+    await message.answer(
+        f"✅ <b>Готово!</b>\n\n"
+        f"Установлена цена 1111₽ для {updated} пользователей:\n"
+        f"{', '.join(user_ids[:10])}"
+        f"{'...' if len(user_ids) > 10 else ''}\n\n"
+        f"Если они не продлят подписку, цена автоматически вернётся к 2222₽.",
+        parse_mode="HTML"
+    )
+    await state.clear()
 
 @router.callback_query(F.data == "subscription_settings")
 async def subscription_settings_menu(callback: CallbackQuery):
