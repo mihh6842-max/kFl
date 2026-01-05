@@ -47,6 +47,7 @@ FALLBACK_CHANNEL_LINK = "https://t.me/+iD8NwG9tfakwNzJi"  # Запасная с�
 ADMIN_IDS = [7338817463, 1478525032, 870227242]
 PRICE_1_MONTH = 2222  # Стандартная цена для новых пользователей
 AUTO_BROADCAST_ENABLED = True  # Автоматическая рассылка вкл/выкл
+BROADCAST_INTERVAL_HOURS = 10  # Интервал авто-рассылки в часах
 DB_PATH = 'data/bot.db'  # Путь к базе данных
 GOOGLE_SHEETS_URL = env.get('GOOGLE_SHEETS_URL', '')
 
@@ -80,6 +81,9 @@ class ProfileStates(StatesGroup):
 
 class PhoneState(StatesGroup):
     waiting_phone = State()
+
+class WithdrawalState(StatesGroup):
+    waiting_details = State()
 
 class ContentUpload(StatesGroup):
     waiting_pdf_category = State()
@@ -160,6 +164,20 @@ async def init_db():
             created_at INTEGER
         )''')
 
+        # Добавляем колонки для уведомлений если их нет
+        try:
+            await db.execute('ALTER TABLE users ADD COLUMN notified_2d INTEGER')
+        except:
+            pass  # Колонка уже существует
+        try:
+            await db.execute('ALTER TABLE users ADD COLUMN notified_1h INTEGER')
+        except:
+            pass  # Колонка уже существует
+        try:
+            await db.execute('ALTER TABLE users ADD COLUMN referral_earnings REAL DEFAULT 0')
+        except:
+            pass  # Колонка уже существует
+
         await db.execute('''CREATE TABLE IF NOT EXISTS referrals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             referrer_id INTEGER,
@@ -168,6 +186,19 @@ async def init_db():
             FOREIGN KEY (referrer_id) REFERENCES users(user_id),
             FOREIGN KEY (referred_id) REFERENCES users(user_id)
         )''')
+
+        await db.execute('''CREATE TABLE IF NOT EXISTS withdrawal_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount REAL,
+            card_number TEXT,
+            bank TEXT,
+            full_name TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+
         await db.commit()
 
 # ======================== ФУНКЦИИ ========================
@@ -195,8 +226,11 @@ async def get_user_profile(user_id: int) -> dict:
 
 async def add_user(user_id: int, username: str = None, referrer_id: int = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('INSERT OR IGNORE INTO users (user_id, username, created_at) VALUES (?, ?, ?)',
+        cursor = await db.execute('INSERT OR IGNORE INTO users (user_id, username, created_at) VALUES (?, ?, ?)',
                         (user_id, username, int(datetime.now().timestamp())))
+
+        # Проверяем, был ли добавлен новый пользователь
+        is_new_user = cursor.rowcount > 0
 
         # Если есть реферер и пользователь новый, сохраняем реферальную связь
         if referrer_id:
@@ -210,6 +244,21 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
                 logging.error(f"Ошибка сохранения реферала: {e}")
 
         await db.commit()
+
+        # Уведомляем админов о новом пользователе
+        if is_new_user:
+            for admin_id in ADMIN_IDS:
+                try:
+                    ref_text = f"👥 Реферер: {referrer_id}" if referrer_id else "🆕 Прямая регистрация"
+                    await bot.send_message(
+                        admin_id,
+                        f"👤 Новый пользователь!\n\n"
+                        f"🆔 User ID: {user_id}\n"
+                        f"📱 Username: @{username if username else 'нет'}\n"
+                        f"{ref_text}"
+                    )
+                except:
+                    pass
 
 async def auto_export_referrals():
     """Автоматический экспорт рефералов в Google Таблицы (при добавлении нового реферала)"""
@@ -933,8 +982,8 @@ async def broadcast_to_non_subscribers():
         return 0
 
 async def subscription_reminder_scheduler():
-    """Планировщик рассылки: первая через 30 мин, далее каждые 15 часов"""
-    global AUTO_BROADCAST_ENABLED
+    """Планировщик рассылки: первая через 30 мин, далее каждые N часов"""
+    global AUTO_BROADCAST_ENABLED, BROADCAST_INTERVAL_HOURS
     first_run = True
     while True:
         try:
@@ -943,7 +992,7 @@ async def subscription_reminder_scheduler():
                 await asyncio.sleep(30 * 60)  # 30 минут
                 first_run = False
             else:
-                await asyncio.sleep(15 * 3600)  # 15 часов
+                await asyncio.sleep(BROADCAST_INTERVAL_HOURS * 3600)  # N часов
 
             if not AUTO_BROADCAST_ENABLED:
                 logging.info("[SCHEDULER] Авто-рассылка отключена, пропускаем...")
@@ -956,6 +1005,71 @@ async def subscription_reminder_scheduler():
         except Exception as e:
             logging.error(f"[SCHEDULER ERROR] {e}")
             await asyncio.sleep(3600)  # При ошибке подождать 1 час
+
+async def send_subscription_reminders():
+    """Отправляет уведомления за 2 дня и 1 час до окончания подписки"""
+    now = int(datetime.now().timestamp())
+    two_days = now + 2 * 24 * 3600  # +2 дня
+    one_hour = now + 3600  # +1 час
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Уведомление за 2 дня
+        async with db.execute(
+            '''SELECT user_id, name, subscription_until FROM users
+               WHERE subscription_until BETWEEN ? AND ?
+               AND notified_2d IS NULL''',
+            (now, two_days)
+        ) as cursor:
+            users_2d = await cursor.fetchall()
+
+        # Уведомление за 1 час
+        async with db.execute(
+            '''SELECT user_id, name, subscription_until FROM users
+               WHERE subscription_until BETWEEN ? AND ?
+               AND notified_1h IS NULL''',
+            (now, one_hour)
+        ) as cursor:
+            users_1h = await cursor.fetchall()
+
+        # Отправляем уведомления за 2 дня
+        for user_id, name, sub_until in users_2d:
+            try:
+                await bot.send_message(
+                    user_id,
+                    "⏰ <b>До окончания действия тарифа осталось 2 дня</b>\n\n"
+                    "Не забудьте продлить подписку, чтобы не потерять доступ к каналу!",
+                    parse_mode="HTML"
+                )
+                await db.execute('UPDATE users SET notified_2d = ? WHERE user_id = ?', (now, user_id))
+                logging.info(f"[REMINDER] Отправлено уведомление за 2 дня: {name}")
+            except Exception as e:
+                logging.error(f"[REMINDER] Ошибка отправки за 2 дня: {e}")
+
+        # Отправляем уведомления за 1 час
+        for user_id, name, sub_until in users_1h:
+            try:
+                await bot.send_message(
+                    user_id,
+                    "⚠️ <b>До окончания тарифа осталось совсем немного!</b>\n\n"
+                    "Не забудьте продлить подписку, чтобы не потерять доступ к каналу!",
+                    parse_mode="HTML"
+                )
+                await db.execute('UPDATE users SET notified_1h = ? WHERE user_id = ?', (now, user_id))
+                logging.info(f"[REMINDER] Отправлено уведомление за 1 час: {name}")
+            except Exception as e:
+                logging.error(f"[REMINDER] Ошибка отправки за 1 час: {e}")
+
+        await db.commit()
+
+async def subscription_notification_scheduler():
+    """Планировщик уведомлений о скором истечении подписки - каждый час"""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Проверка каждый час
+            await send_subscription_reminders()
+        except Exception as e:
+            logging.error(f"[NOTIFICATION ERROR] {e}")
+            await asyncio.sleep(3600)
 
 async def check_and_kick_expired_users():
     """Проверяет истёкшие подписки и кикает из канала"""
@@ -1102,16 +1216,57 @@ async def update_phone(user_id: int, phone: str):
         await db.execute('UPDATE users SET phone = ? WHERE user_id = ?', (phone, user_id))
         await db.commit()
 
-async def activate_subscription(user_id: int, days: int = 30):
+async def activate_subscription(user_id: int, days: int = 30, amount: int = 0):
     sub_until = int((datetime.now() + timedelta(days=days)).timestamp())
     grace_until = sub_until + 7 * 24 * 3600  # +7 дней для сохранения цены
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            'UPDATE users SET subscription_until = ?, grace_period_until = ? WHERE user_id = ?',
+            'UPDATE users SET subscription_until = ?, grace_period_until = ?, notified_2d = NULL, notified_1h = NULL WHERE user_id = ?',
             (sub_until, grace_until, user_id)
         )
+
+        # Начисление 10% рефереру
+        if amount > 0:
+            async with db.execute('SELECT referrer_id FROM referrals WHERE referred_id = ?', (user_id,)) as cursor:
+                ref_row = await cursor.fetchone()
+                if ref_row:
+                    referrer_id = ref_row[0]
+                    commission = amount * 0.1
+                    await db.execute(
+                        'UPDATE users SET referral_earnings = referral_earnings + ? WHERE user_id = ?',
+                        (commission, referrer_id)
+                    )
+                    # Уведомляем реферера о начислении
+                    try:
+                        await bot.send_message(
+                            referrer_id,
+                            f"💰 Вам начислено {commission:.2f}₽ за приглашенного друга!\n\n"
+                            f"Ваш реферал оформил подписку."
+                        )
+                    except:
+                        pass
+
         await db.commit()
-    
+
+        # Уведомляем админов о новом подписчике
+        async with db.execute('SELECT name, username FROM users WHERE user_id = ?', (user_id,)) as cursor:
+            user_row = await cursor.fetchone()
+            name = user_row[0] if user_row else "Неизвестно"
+            username = user_row[1] if user_row and user_row[1] else "нет"
+
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"🎉 Новый подписчик!\n\n"
+                    f"👤 Имя: {name}\n"
+                    f"🆔 User ID: {user_id}\n"
+                    f"📱 Username: @{username}\n"
+                    f"💰 Сумма: {amount}₽"
+                )
+            except:
+                pass
+
     try:
         await bot.unban_chat_member(CHANNEL_ID, user_id)
         invite_link = await bot.create_chat_invite_link(CHANNEL_ID, member_limit=1)
@@ -1910,7 +2065,7 @@ async def generate_test_feedback(profile: dict) -> str:
 # ======================== КЛАВИАТУРЫ ========================
 def main_kb(admin=False) -> ReplyKeyboardMarkup:
     btns = [
-        [KeyboardButton(text="💳 Оплатить доступ")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="💳 Оплатить доступ")],
         [KeyboardButton(text="✅ Активная подписка")],
         [KeyboardButton(text="👥 Пригласить друга")],
         [KeyboardButton(text="💬 Поддержка")]
@@ -1920,13 +2075,15 @@ def main_kb(admin=False) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=btns, resize_keyboard=True)
 
 def admin_kb() -> InlineKeyboardMarkup:
-    global AUTO_BROADCAST_ENABLED
+    global AUTO_BROADCAST_ENABLED, BROADCAST_INTERVAL_HOURS
     broadcast_status = "✅ Авто-рассылка ВКЛ" if AUTO_BROADCAST_ENABLED else "❌ Авто-рассылка ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="🚀 Создать рассылку", callback_data="create_broadcast")],
         [InlineKeyboardButton(text="🤖 AI Рассылка (без подписки)", callback_data="ai_broadcast")],
         [InlineKeyboardButton(text=broadcast_status, callback_data="toggle_auto_broadcast")],
+        [InlineKeyboardButton(text=f"⏰ Интервал: {BROADCAST_INTERVAL_HOURS}ч", callback_data="set_broadcast_interval")],
+        [InlineKeyboardButton(text="👁 Превью рассылки (мне)", callback_data="preview_broadcast_me")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
         [InlineKeyboardButton(text="📚 Просмотр контента", callback_data="view_content")],
         [InlineKeyboardButton(text="📊 Экспорт в Google Таблицы", callback_data="export_menu")],
@@ -2520,7 +2677,7 @@ async def check_payment(payment_id: str, user_id: int, max_checks: int = 60):
                     )
                     await db.commit()
 
-                await activate_subscription(user_id, 30)
+                await activate_subscription(user_id, 30, paid_amount)
 
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute('UPDATE payments SET status = ? WHERE payment_id = ?', ('succeeded', payment_id))
@@ -2612,6 +2769,150 @@ async def referral_button(message: Message):
     ])
 
     await message.answer(ref_message, parse_mode="HTML", reply_markup=share_kb)
+
+@router.message(F.text == "👤 Профиль")
+async def profile_button(message: Message):
+    user_id = message.from_user.id
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Получаем данные пользователя
+        async with db.execute(
+            'SELECT name, age, subscription_until, referral_earnings FROM users WHERE user_id = ?',
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                await message.answer("❌ Профиль не найден")
+                return
+
+            name = row[0] or "Не указано"
+            age = row[1] or "Не указано"
+            sub_until = row[2]
+            earnings = row[3] or 0.0
+
+        # Проверяем подписку
+        now = int(datetime.now().timestamp())
+        if sub_until and sub_until > now:
+            sub_status = "✅ Активна"
+            days_left = (sub_until - now) // 86400
+            sub_text = f"📅 Осталось дней: {days_left}"
+        else:
+            sub_status = "❌ Не активна"
+            sub_text = "Оформите подписку для доступа к материалам"
+
+        # Считаем количество рефералов
+        async with db.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id = ?', (user_id,)) as cursor:
+            ref_count = (await cursor.fetchone())[0]
+
+    profile_text = (
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"📝 Имя: {name}\n"
+        f"🎂 Возраст: {age}\n\n"
+        f"💎 Подписка: {sub_status}\n"
+        f"{sub_text}\n\n"
+        f"👥 Рефералов: {ref_count}\n"
+        f"💰 Заработано: {earnings:.2f}₽"
+    )
+
+    # Кнопка вывода доступна только если есть заработок
+    if earnings >= 100:
+        profile_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💸 Вывод средств", callback_data="request_withdrawal")]
+        ])
+        await message.answer(profile_text, parse_mode="HTML", reply_markup=profile_kb)
+    else:
+        min_amount_text = f"\n\n<i>💡 Минимальная сумма для вывода: 100₽</i>"
+        await message.answer(profile_text + min_amount_text, parse_mode="HTML")
+
+@router.callback_query(F.data == "request_withdrawal")
+async def withdrawal_request(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT referral_earnings FROM users WHERE user_id = ?', (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row or not row[0] or row[0] < 100:
+                await callback.answer("❌ Недостаточно средств для вывода (минимум 100₽)", show_alert=True)
+                return
+
+            earnings = row[0]
+
+    await state.set_state(WithdrawalState.waiting_details)
+    await state.update_data(amount=earnings)
+
+    await callback.message.answer(
+        f"💸 <b>Вывод средств</b>\n\n"
+        f"Сумма к выводу: {earnings:.2f}₽\n\n"
+        f"Пожалуйста, отправьте реквизиты в формате:\n\n"
+        f"<code>Номер карты\nБанк\nФИО</code>\n\n"
+        f"<b>Пример:</b>\n"
+        f"<code>1234 5678 9012 3456\nСбербанк\nИванов Иван Иванович</code>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(WithdrawalState.waiting_details)
+async def process_withdrawal_details(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    details = message.text.strip().split('\n')
+
+    if len(details) < 3:
+        await message.answer(
+            "❌ Неверный формат. Отправьте реквизиты построчно:\n"
+            "Номер карты\nБанк\nФИО"
+        )
+        return
+
+    card_number = details[0].strip()
+    bank = details[1].strip()
+    full_name = details[2].strip()
+
+    data = await state.get_data()
+    amount = data.get('amount', 0)
+
+    # Сохраняем запрос в БД
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            'INSERT INTO withdrawal_requests (user_id, amount, card_number, bank, full_name, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+            (user_id, amount, card_number, bank, full_name, int(datetime.now().timestamp()))
+        )
+
+        # Обнуляем заработок
+        await db.execute('UPDATE users SET referral_earnings = 0 WHERE user_id = ?', (user_id,))
+        await db.commit()
+
+    # Уведомляем админов
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT name, username FROM users WHERE user_id = ?', (user_id,)) as cursor:
+            user_row = await cursor.fetchone()
+            name = user_row[0] if user_row else "Неизвестно"
+            username = user_row[1] if user_row and user_row[1] else "нет"
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"💸 <b>Запрос на вывод средств</b>\n\n"
+                f"👤 Пользователь: {name}\n"
+                f"🆔 User ID: {user_id}\n"
+                f"📱 Username: @{username}\n"
+                f"💰 Сумма: {amount:.2f}₽\n\n"
+                f"<b>Реквизиты:</b>\n"
+                f"💳 Карта: <code>{card_number}</code>\n"
+                f"🏦 Банк: {bank}\n"
+                f"👤 ФИО: {full_name}",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+    await message.answer(
+        "✅ <b>Запрос принят!</b>\n\n"
+        "💰 В течение часа средства поступят на ваш счет.\n\n"
+        "Спасибо за сотрудничество! 🤝",
+        parse_mode="HTML"
+    )
+    await state.clear()
 
 # ======================== АДМИН ========================
 @router.message(F.text == "⚙️ Админ-панель")
@@ -2962,6 +3263,82 @@ async def toggle_auto_broadcast(callback: CallbackQuery):
     AUTO_BROADCAST_ENABLED = not AUTO_BROADCAST_ENABLED
     status = "включена ✅" if AUTO_BROADCAST_ENABLED else "выключена ❌"
     await callback.answer(f"Авто-рассылка {status}", show_alert=True)
+    await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_kb())
+
+@router.callback_query(F.data == "set_broadcast_interval")
+async def set_broadcast_interval(callback: CallbackQuery):
+    """Настройка интервала авто-рассылки"""
+    global BROADCAST_INTERVAL_HOURS
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="6 часов", callback_data="interval_6")],
+        [InlineKeyboardButton(text="10 часов", callback_data="interval_10")],
+        [InlineKeyboardButton(text="12 часов", callback_data="interval_12")],
+        [InlineKeyboardButton(text="15 часов", callback_data="interval_15")],
+        [InlineKeyboardButton(text="24 часа", callback_data="interval_24")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+    ])
+    await callback.message.edit_text(
+        f"⏰ <b>Интервал авто-рассылки</b>\n\nТекущий: {BROADCAST_INTERVAL_HOURS} часов",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data.startswith("interval_"))
+async def set_interval_value(callback: CallbackQuery):
+    """Установить интервал"""
+    global BROADCAST_INTERVAL_HOURS
+    if not is_admin(callback.from_user.id):
+        return
+
+    hours = int(callback.data.split("_")[1])
+    BROADCAST_INTERVAL_HOURS = hours
+    await callback.answer(f"Интервал установлен: {hours} часов", show_alert=True)
+    await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_kb())
+
+@router.callback_query(F.data == "preview_broadcast_me")
+async def preview_broadcast_me(callback: CallbackQuery):
+    """Отправить превью рассылки админу"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    # Получаем профиль админа
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT * FROM users WHERE user_id = ?', (callback.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                profile = {
+                    'name': row[4],
+                    'age': row[5],
+                    'gender': row[6],
+                    'goal': row[7],
+                    'level': row[8],
+                    'weekly_training': row[9],
+                    'injuries': row[10],
+                    'region': row[11],
+                    'lifestyle': row[12],
+                    'recovery': row[13],
+                    'tours': row[14]
+                }
+            else:
+                profile = None
+
+    msg = await generate_subscription_promo(profile, callback.from_user.id)
+    await callback.message.answer(
+        f"👁 <b>Превью рассылки:</b>\n\n{msg}",
+        parse_mode="HTML"
+    )
+    await callback.answer("Превью отправлено")
+
+@router.callback_query(F.data == "admin_panel")
+async def back_to_admin(callback: CallbackQuery):
+    """Вернуться в админ панель"""
+    if not is_admin(callback.from_user.id):
+        return
     await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_kb())
 
 @router.callback_query(F.data == "ai_broadcast")
@@ -3690,11 +4067,15 @@ async def main():
 
     # Запускаем планировщик рассылки для пользователей без подписки
     asyncio.create_task(subscription_reminder_scheduler())
-    logging.info("📨 Планировщик рассылки запущен (каждые 15 часов)")
+    logging.info(f"📨 Планировщик рассылки запущен (каждые {BROADCAST_INTERVAL_HOURS} часов)")
 
     # Запускаем проверку истёкших подписок
     asyncio.create_task(subscription_checker_scheduler())
     logging.info("🔒 Проверка подписок запущена (каждые 5 минут)")
+
+    # Запускаем отправку уведомлений о скором истечении подписки
+    asyncio.create_task(subscription_notification_scheduler())
+    logging.info("⏰ Уведомления о подписке запущены (каждый час)")
 
     logging.info("🚀 Бот запущен!")
     await dp.start_polling(bot)
