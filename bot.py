@@ -115,6 +115,11 @@ class BroadcastMediaState(StatesGroup):
     waiting_broadcast_media = State()
     confirm_broadcast = State()
 
+class NewBroadcastState(StatesGroup):
+    waiting_text = State()
+    waiting_media = State()
+    confirm_send = State()
+
 # ======================== БД ========================
 async def init_db():
     # Создаём папку data если её нет
@@ -2107,22 +2112,17 @@ def main_kb(admin=False) -> ReplyKeyboardMarkup:
 
 def admin_kb() -> InlineKeyboardMarkup:
     global AUTO_BROADCAST_ENABLED, BROADCAST_INTERVAL_HOURS
-    broadcast_status = "✅ Авто-рассылка ВКЛ" if AUTO_BROADCAST_ENABLED else "❌ Авто-рассылка ВЫКЛ"
+    broadcast_status = "✅ ВКЛ" if AUTO_BROADCAST_ENABLED else "❌ ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="🚀 Создать рассылку", callback_data="create_broadcast")],
-        [InlineKeyboardButton(text="🤖 AI Рассылка (без подписки)", callback_data="ai_broadcast")],
-        [InlineKeyboardButton(text="🖼 Рассылка с фото", callback_data="broadcast_with_photo")],
-        [InlineKeyboardButton(text="🎥 Рассылка с видео", callback_data="broadcast_with_video")],
-        [InlineKeyboardButton(text=broadcast_status, callback_data="toggle_auto_broadcast")],
+        [InlineKeyboardButton(text="📨 Рассылка", callback_data="broadcast_menu")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
+         InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
+        [InlineKeyboardButton(text="💰 Цена 1111₽", callback_data="set_special_price"),
+         InlineKeyboardButton(text="📚 Контент", callback_data="view_content")],
+        [InlineKeyboardButton(text=f"🤖 AI Авто: {broadcast_status}", callback_data="toggle_auto_broadcast")],
         [InlineKeyboardButton(text=f"⏰ Интервал: {BROADCAST_INTERVAL_HOURS}ч", callback_data="set_broadcast_interval")],
-        [InlineKeyboardButton(text="👁 Превью рассылки (мне)", callback_data="preview_broadcast_me")],
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
-        [InlineKeyboardButton(text="💰 Установить цену 1111₽", callback_data="set_special_price")],
-        [InlineKeyboardButton(text="📚 Просмотр контента", callback_data="view_content")],
-        [InlineKeyboardButton(text="📊 Экспорт в Google Таблицы", callback_data="export_menu")],
-        [InlineKeyboardButton(text="🎬 Приветственное медиа", callback_data="change_welcome_media")],
-        [InlineKeyboardButton(text="⚙️ Настройки подписки", callback_data="subscription_settings")]
+        [InlineKeyboardButton(text="📊 Google Таблицы", callback_data="export_menu")],
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="subscription_settings")]
     ])
 
 def test_start_kb() -> InlineKeyboardMarkup:
@@ -3206,94 +3206,7 @@ async def admin_users(callback: CallbackQuery):
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
-@router.callback_query(F.data == "create_broadcast")
-async def create_broadcast(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    
-    await callback.message.answer("🤖 Генерирую примеры рассылок...")
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute('SELECT user_id FROM users WHERE profile_completed=1 ORDER BY RANDOM() LIMIT 3') as cursor:
-            users = await cursor.fetchall()
-    
-    if not users:
-        await callback.message.answer("❌ Нет пользователей с заполненными профилями")
-        await callback.answer()
-        return
-    
-    prof = await get_user_profile(users[0][0])
-    if prof:
-        msg = await generate_personalized_message(prof)
-        sample_text = f"👤 <b>{prof['name']}, {prof['age']} лет</b>\n{msg}"
-    else:
-        sample_text = "Ошибка генерации"
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Отправить всем", callback_data="send_broadcast")],
-        [InlineKeyboardButton(text="🔄 Перегенерировать", callback_data="create_broadcast")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_broadcast")]
-    ])
-    
-    await callback.message.answer(
-        f"📝 <b>Примеры сообщений:</b>\n\n{sample_text}\n\n"
-        f"Каждый пользователь получит уникальное сообщение на основе своего профиля.",
-        parse_mode="HTML",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "send_broadcast")
-async def send_broadcast(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-
-    await callback.message.edit_text("🚀 Отправляю уникальные рассылки с антиповтором...")
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute('SELECT user_id FROM users WHERE profile_completed=1') as cursor:
-            users = await cursor.fetchall()
-
-    sent = 0
-    skipped = 0
-    for (uid,) in users:
-        try:
-            prof = await get_user_profile(uid)
-            if prof:
-                # Генерируем сообщение
-                msg = await generate_personalized_message(prof)
-
-                # Проверяем, было ли отправлено
-                max_attempts = 5
-                attempt = 0
-                while await was_message_sent(uid, msg) and attempt < max_attempts:
-                    # Меняем хеш профиля для генерации другого варианта
-                    prof['_rand'] = random.randint(1, 10000)
-                    msg = await generate_personalized_message(prof)
-                    attempt += 1
-
-                if await was_message_sent(uid, msg):
-                    skipped += 1
-                    logging.info(f"Пропуск {uid}: все варианты уже отправлены")
-                else:
-                    await bot.send_message(uid, msg, parse_mode="HTML")
-                    await save_message_to_history(uid, msg)
-                    sent += 1
-                    await asyncio.sleep(0.5)
-        except Exception as e:
-            logging.error(f"Ошибка отправки {uid}: {e}")
-
-    await callback.message.answer(
-        f"✅ Рассылка завершена!\n"
-        f"📤 Отправлено: {sent}\n"
-        f"⏭ Пропущено (повторы): {skipped}"
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "cancel_broadcast")
-async def cancel_broadcast(callback: CallbackQuery):
-    await callback.message.edit_text("❌ Рассылка отменена")
-    await callback.answer()
+# Старая система рассылки удалена - используется новая пошаговая система
 
 @router.callback_query(F.data == "toggle_auto_broadcast")
 async def toggle_auto_broadcast(callback: CallbackQuery):
@@ -4367,203 +4280,229 @@ async def secret_word_handler(message: Message):
                 "Оплати подписку, чтобы получить доступ к каналу!"
             )
 
-# ======================== РАССЫЛКА С МЕДИА ========================
-@router.callback_query(F.data == "broadcast_with_photo")
-async def broadcast_with_photo_start(callback: CallbackQuery, state: FSMContext):
-    """Начало рассылки с фото"""
+# ======================== НОВАЯ СИСТЕМА РАССЫЛКИ ========================
+@router.callback_query(F.data == "broadcast_menu")
+async def broadcast_menu(callback: CallbackQuery):
+    """Меню рассылки"""
     if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещен", show_alert=True)
         return
 
-    await state.update_data(broadcast_media_type="photo")
-    await state.set_state(BroadcastMediaState.waiting_broadcast_media)
-    await callback.message.answer(
-        "🖼 <b>Рассылка с фото</b>\n\n"
-        "Отправь фото для рассылки пользователям без подписки.\n\n"
-        "AI автоматически сгенерирует уникальный текст для каждого пользователя.",
-        parse_mode="HTML"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Рассылка с текстом", callback_data="new_broadcast_start")],
+        [InlineKeyboardButton(text="🤖 AI рассылка (без подписки)", callback_data="ai_broadcast")],
+        [InlineKeyboardButton(text="👁 Превью AI рассылки", callback_data="preview_broadcast_me")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+    ])
+
+    await callback.message.edit_text(
+        "📨 <b>Меню рассылки</b>\n\n"
+        "Выберите тип рассылки:",
+        parse_mode="HTML",
+        reply_markup=kb
     )
     await callback.answer()
 
-@router.callback_query(F.data == "broadcast_with_video")
-async def broadcast_with_video_start(callback: CallbackQuery, state: FSMContext):
-    """Начало рассылки с видео"""
+@router.callback_query(F.data == "new_broadcast_start")
+async def new_broadcast_start(callback: CallbackQuery, state: FSMContext):
+    """Начало новой рассылки - ввод текста"""
     if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещен", show_alert=True)
         return
 
-    await state.update_data(broadcast_media_type="video")
-    await state.set_state(BroadcastMediaState.waiting_broadcast_media)
+    await state.set_state(NewBroadcastState.waiting_text)
     await callback.message.answer(
-        "🎥 <b>Рассылка с видео</b>\n\n"
-        "Отправь видео для рассылки пользователям без подписки.\n\n"
-        "AI автоматически сгенерирует уникальный текст для каждого пользователя.",
+        "📝 <b>Шаг 1/3: Текст рассылки</b>\n\n"
+        "Отправьте текст сообщения для рассылки.\n\n"
+        "Можете использовать HTML теги:\n"
+        "<code>&lt;b&gt;жирный&lt;/b&gt;</code>\n"
+        "<code>&lt;i&gt;курсив&lt;/i&gt;</code>\n"
+        "<code>&lt;code&gt;код&lt;/code&gt;</code>",
         parse_mode="HTML"
     )
     await callback.answer()
 
-@router.message(BroadcastMediaState.waiting_broadcast_media, F.photo)
+@router.message(NewBroadcastState.waiting_text)
+async def new_broadcast_text_received(message: Message, state: FSMContext):
+    """Получен текст рассылки"""
+    if not is_admin(message.from_user.id):
+        return
+
+    text = message.text or message.caption
+    if not text:
+        await message.answer("❌ Отправьте текстовое сообщение")
+        return
+
+    await state.update_data(broadcast_text=text)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📷 Добавить фото", callback_data="add_photo")],
+        [InlineKeyboardButton(text="🎥 Добавить видео", callback_data="add_video")],
+        [InlineKeyboardButton(text="➡️ Пропустить (только текст)", callback_data="skip_media")]
+    ])
+
+    await message.answer(
+        "✅ <b>Шаг 2/3: Медиа (опционально)</b>\n\n"
+        "Хотите добавить фото или видео?\n\n"
+        f"Ваш текст:\n{text[:100]}{'...' if len(text) > 100 else ''}",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+@router.callback_query(F.data.in_(["add_photo", "add_video"]))
+async def add_media_type(callback: CallbackQuery, state: FSMContext):
+    """Выбор типа медиа"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    media_type = "photo" if callback.data == "add_photo" else "video"
+    await state.update_data(media_type=media_type)
+    await state.set_state(NewBroadcastState.waiting_media)
+
+    emoji = "📷 фото" if media_type == "photo" else "🎥 видео"
+    await callback.message.edit_text(
+        f"📤 <b>Отправьте {emoji}</b>\n\n"
+        f"Загрузите {'фотографию' if media_type == 'photo' else 'видео'} для рассылки.",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "skip_media")
+async def skip_media(callback: CallbackQuery, state: FSMContext):
+    """Пропуск медиа - переход к выбору аудитории"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    await show_audience_selection(callback.message, state)
+    await callback.answer()
+
+@router.message(NewBroadcastState.waiting_media, F.photo)
 async def broadcast_photo_received(message: Message, state: FSMContext):
-    """Получено фото для рассылки"""
+    """Получено фото"""
     if not is_admin(message.from_user.id):
         return
 
     photo_id = message.photo[-1].file_id
     await state.update_data(media_file_id=photo_id)
+    await show_audience_selection(message, state)
 
-    # Генерируем превью
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute('SELECT user_id FROM users WHERE profile_completed=1 AND (subscription_until IS NULL OR subscription_until < ?) LIMIT 1',
-                             (int(datetime.now().timestamp()),)) as cursor:
-            user = await cursor.fetchone()
-
-    preview_text = "🖼 <b>ПРЕВЬЮ РАССЫЛКИ С ФОТО</b>\n\n"
-    if user:
-        profile = await get_user_profile(user[0])
-        if profile:
-            preview_msg = await generate_subscription_promo(profile, user[0])
-            preview_text += f"Пример текста:\n\n{preview_msg}\n\n"
-
-    preview_text += "<i>Каждый пользователь получит уникальное персонализированное сообщение с этим фото.</i>"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Отправить всем без подписки", callback_data="confirm_media_broadcast")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_media_broadcast")]
-    ])
-
-    await message.answer_photo(
-        photo=photo_id,
-        caption=preview_text,
-        parse_mode="HTML",
-        reply_markup=kb
-    )
-    await state.set_state(BroadcastMediaState.confirm_broadcast)
-
-@router.message(BroadcastMediaState.waiting_broadcast_media, F.video)
+@router.message(NewBroadcastState.waiting_media, F.video)
 async def broadcast_video_received(message: Message, state: FSMContext):
-    """Получено видео для рассылки"""
+    """Получено видео"""
     if not is_admin(message.from_user.id):
         return
 
     video_id = message.video.file_id
     await state.update_data(media_file_id=video_id)
+    await show_audience_selection(message, state)
 
-    # Генерируем превью
+async def show_audience_selection(message: Message, state: FSMContext):
+    """Показать выбор аудитории"""
+    # Считаем пользователей
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute('SELECT user_id FROM users WHERE profile_completed=1 AND (subscription_until IS NULL OR subscription_until < ?) LIMIT 1',
-                             (int(datetime.now().timestamp()),)) as cursor:
-            user = await cursor.fetchone()
+        current_time = int(datetime.now().timestamp())
 
-    preview_text = "🎥 <b>ПРЕВЬЮ РАССЫЛКИ С ВИДЕО</b>\n\n"
-    if user:
-        profile = await get_user_profile(user[0])
-        if profile:
-            preview_msg = await generate_subscription_promo(profile, user[0])
-            preview_text += f"Пример текста:\n\n{preview_msg}\n\n"
+        # Всего пользователей
+        async with db.execute('SELECT COUNT(*) FROM users') as cursor:
+            total = (await cursor.fetchone())[0]
 
-    preview_text += "<i>Каждый пользователь получит уникальное персонализированное сообщение с этим видео.</i>"
+        # Без подписки
+        async with db.execute(
+            'SELECT COUNT(*) FROM users WHERE subscription_until IS NULL OR subscription_until < ?',
+            (current_time,)
+        ) as cursor:
+            no_sub = (await cursor.fetchone())[0]
+
+        # С подпиской
+        with_sub = total - no_sub
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Отправить всем без подписки", callback_data="confirm_media_broadcast")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_media_broadcast")]
+        [InlineKeyboardButton(text=f"📢 Всем ({total} чел.)", callback_data="send_to_all")],
+        [InlineKeyboardButton(text=f"❌ Только без подписки ({no_sub} чел.)", callback_data="send_to_no_sub")],
+        [InlineKeyboardButton(text=f"✅ Только с подпиской ({with_sub} чел.)", callback_data="send_to_with_sub")],
+        [InlineKeyboardButton(text="🚫 Отмена", callback_data="cancel_broadcast")]
     ])
 
-    await message.answer_video(
-        video=video_id,
-        caption=preview_text,
+    await message.answer(
+        "👥 <b>Шаг 3/3: Кому отправить?</b>\n\n"
+        f"📊 Всего пользователей: {total}\n"
+        f"✅ С подпиской: {with_sub}\n"
+        f"❌ Без подписки: {no_sub}\n\n"
+        "Выберите аудиторию:",
         parse_mode="HTML",
         reply_markup=kb
     )
-    await state.set_state(BroadcastMediaState.confirm_broadcast)
+    await state.set_state(NewBroadcastState.confirm_send)
 
-@router.callback_query(F.data == "confirm_media_broadcast")
-async def confirm_media_broadcast(callback: CallbackQuery, state: FSMContext):
-    """Подтверждение и отправка рассылки с медиа"""
+@router.callback_query(F.data.in_(["send_to_all", "send_to_no_sub", "send_to_with_sub"]))
+async def confirm_and_send_broadcast(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение и отправка рассылки"""
     if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещен", show_alert=True)
         return
 
     data = await state.get_data()
-    media_type = data.get('broadcast_media_type')
+    text = data.get('broadcast_text')
+    media_type = data.get('media_type')
     media_file_id = data.get('media_file_id')
 
-    await callback.message.edit_caption(
-        caption="📨 Отправляю персонализированную рассылку с медиа...",
-        parse_mode="HTML"
-    )
+    target = callback.data  # send_to_all / send_to_no_sub / send_to_with_sub
 
-    # Получаем всех пользователей без подписки
+    await callback.message.edit_text("📨 Отправляю рассылку...")
+
+    # Получаем пользователей
     async with aiosqlite.connect(DB_PATH) as db:
         current_time = int(datetime.now().timestamp())
-        async with db.execute(
-            '''SELECT user_id, name, age, goal, level, lifestyle, weekly_training
-               FROM users WHERE subscription_until IS NULL OR subscription_until < ?''',
-            (current_time,)
-        ) as cursor:
+
+        if target == "send_to_all":
+            query = 'SELECT user_id FROM users'
+            params = ()
+        elif target == "send_to_no_sub":
+            query = 'SELECT user_id FROM users WHERE subscription_until IS NULL OR subscription_until < ?'
+            params = (current_time,)
+        else:  # send_to_with_sub
+            query = 'SELECT user_id FROM users WHERE subscription_until IS NOT NULL AND subscription_until >= ?'
+            params = (current_time,)
+
+        async with db.execute(query, params) as cursor:
             users = await cursor.fetchall()
 
     sent_count = 0
+    failed_count = 0
+
     for row in users:
         user_id = row[0]
-        profile = {
-            'name': row[1],
-            'age': row[2],
-            'goal': row[3],
-            'level': row[4],
-            'lifestyle': row[5],
-            'weekly_training': row[6]
-        }
-
         try:
-            # Генерируем уникальное персонализированное сообщение
-            promo_msg = await generate_subscription_promo(profile, user_id)
-
-            # Кнопка подписки
-            subscribe_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💎 Оформить подписку", callback_data="pay_subscription")]
-            ])
-
-            # Отправляем с медиа
-            if media_type == "photo":
-                await bot.send_photo(
-                    user_id,
-                    photo=media_file_id,
-                    caption=promo_msg,
-                    parse_mode="HTML",
-                    reply_markup=subscribe_kb
-                )
-            elif media_type == "video":
-                await bot.send_video(
-                    user_id,
-                    video=media_file_id,
-                    caption=promo_msg,
-                    parse_mode="HTML",
-                    reply_markup=subscribe_kb
-                )
+            # Отправляем в зависимости от типа
+            if media_file_id and media_type == "photo":
+                await bot.send_photo(user_id, photo=media_file_id, caption=text, parse_mode="HTML")
+            elif media_file_id and media_type == "video":
+                await bot.send_video(user_id, video=media_file_id, caption=text, parse_mode="HTML")
+            else:
+                await bot.send_message(user_id, text=text, parse_mode="HTML")
 
             sent_count += 1
-            logging.info(f"[MEDIA BROADCAST] Отправлено {profile.get('name', user_id)}")
-            await asyncio.sleep(1.0)  # Задержка для API
+            await asyncio.sleep(0.05)  # Небольшая задержка
         except Exception as e:
-            logging.error(f"[MEDIA BROADCAST ERROR] User {user_id}: {e}")
-            continue
+            failed_count += 1
+            logging.error(f"[BROADCAST ERROR] User {user_id}: {e}")
 
-    await callback.message.edit_caption(
-        caption=f"✅ <b>Рассылка завершена!</b>\n\n"
-                f"📨 Отправлено: {sent_count} персонализированных сообщений с медиа",
+    await callback.message.edit_text(
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"📨 Отправлено: {sent_count}\n"
+        f"❌ Ошибок: {failed_count}",
         parse_mode="HTML"
     )
     await state.clear()
     await callback.answer()
 
-@router.callback_query(F.data == "cancel_media_broadcast")
-async def cancel_media_broadcast(callback: CallbackQuery, state: FSMContext):
-    """Отмена рассылки с медиа"""
+@router.callback_query(F.data == "cancel_broadcast")
+async def cancel_broadcast(callback: CallbackQuery, state: FSMContext):
+    """Отмена рассылки"""
     await state.clear()
-    await callback.message.edit_caption(
-        caption="❌ Рассылка отменена",
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text("🚫 Рассылка отменена")
     await callback.answer()
 
 @router.callback_query(F.data == "back_to_admin")
