@@ -3911,7 +3911,47 @@ class SubscriptionSettings(StatesGroup):
 
 @router.callback_query(F.data == "set_special_price")
 async def set_special_price_menu(callback: CallbackQuery):
-    """Показ пользователей с ценой 1111₽ и управление"""
+    """Меню управления ценой 1111₽"""
+    if not is_admin(callback.from_user.id):
+        return
+
+    # Получаем статистику
+    async with aiosqlite.connect(DB_PATH) as db:
+        current_time = int(datetime.now().timestamp())
+
+        # Общее количество пользователей с ценой 1111₽
+        async with db.execute(
+            'SELECT COUNT(*) FROM users WHERE special_price = 1111'
+        ) as cursor:
+            total_count = (await cursor.fetchone())[0]
+
+        # Активные (в пределах grace period)
+        async with db.execute(
+            'SELECT COUNT(*) FROM users WHERE special_price = 1111 AND grace_period_until > ?',
+            (current_time,)
+        ) as cursor:
+            active_count = (await cursor.fetchone())[0]
+
+    text = (
+        f"💰 <b>Управление ценой 1111₽</b>\n\n"
+        f"Всего пользователей: <b>{total_count}</b>\n"
+        f"✅ Активный период: <b>{active_count}</b>\n"
+        f"⏰ Истёкший период: <b>{total_count - active_count}</b>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Установить по списку", callback_data="set_price_manual")],
+        [InlineKeyboardButton(text="📋 Показать список", callback_data="show_special_price_users")],
+        [InlineKeyboardButton(text="⏰ 7 дней", callback_data="set_days_7")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+    ])
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data == "show_special_price_users")
+async def show_special_price_users(callback: CallbackQuery):
+    """Показать список пользователей с ценой 1111₽"""
     if not is_admin(callback.from_user.id):
         return
 
@@ -3922,7 +3962,7 @@ async def set_special_price_menu(callback: CallbackQuery):
         async with db.execute(
             '''SELECT user_id, name, username, grace_period_until, subscription_until
                FROM users WHERE special_price = 1111
-               ORDER BY grace_period_until DESC LIMIT 20''',
+               ORDER BY grace_period_until DESC LIMIT 30''',
         ) as cursor:
             users = await cursor.fetchall()
 
@@ -3933,45 +3973,36 @@ async def set_special_price_menu(callback: CallbackQuery):
             total_count = (await cursor.fetchone())[0]
 
     if not users:
-        text = "💰 <b>Пользователи с ценой 1111₽</b>\n\n❌ Нет пользователей со спец ценой"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Установить цену (список ID)", callback_data="set_price_manual")],
-            [InlineKeyboardButton(text="🌐 Установить ВСЕМ на 7 дней", callback_data="set_price_all")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
-        ])
-    else:
-        text = f"💰 <b>Пользователи с ценой 1111₽</b>\n\n"
-        text += f"Всего: <b>{total_count}</b> пользователей\n\n"
+        await callback.answer("❌ Нет пользователей с ценой 1111₽", show_alert=True)
+        return
 
-        for user_id, name, username, grace_until, sub_until in users:
-            display_name = name or username or f"ID {user_id}"
+    text = f"💰 <b>Пользователи с ценой 1111₽</b>\n\n"
+    text += f"Всего: <b>{total_count}</b> пользователей\n\n"
 
-            # Проверяем активность льготного периода
-            if grace_until and grace_until > current_time:
-                grace_date = datetime.fromtimestamp(grace_until).strftime('%d.%m')
-                status = f"✅ до {grace_date}"
-            else:
-                status = "⏰ Истёк"
+    for user_id, name, username, grace_until, sub_until in users:
+        display_name = name or username or f"ID {user_id}"
 
-            # Проверяем подписку
-            if sub_until and sub_until > current_time:
-                sub_status = "💎"
-            else:
-                sub_status = "❌"
+        # Проверяем активность льготного периода
+        if grace_until and grace_until > current_time:
+            grace_date = datetime.fromtimestamp(grace_until).strftime('%d.%m')
+            status = f"✅ до {grace_date}"
+        else:
+            status = "⏰ Истёк"
 
-            text += f"{sub_status} {display_name} ({status})\n"
+        # Проверяем подписку
+        if sub_until and sub_until > current_time:
+            sub_status = "💎"
+        else:
+            sub_status = "❌"
 
-        if total_count > 20:
-            text += f"\n<i>Показаны первые 20 из {total_count}</i>"
+        text += f"{sub_status} {display_name} ({status})\n"
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⏰ Установить на 7 дней", callback_data="set_days_7")],
-            [InlineKeyboardButton(text="⏰ Установить на 14 дней", callback_data="set_days_14")],
-            [InlineKeyboardButton(text="⏰ Установить на 30 дней", callback_data="set_days_30")],
-            [InlineKeyboardButton(text="✏️ Добавить пользователей", callback_data="set_price_manual")],
-            [InlineKeyboardButton(text="🌐 Установить ВСЕМ на 7 дней", callback_data="set_price_all")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
-        ])
+    if total_count > 30:
+        text += f"\n<i>Показаны первые 30 из {total_count}</i>"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="set_special_price")]
+    ])
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
