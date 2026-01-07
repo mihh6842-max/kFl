@@ -111,6 +111,10 @@ class ContentUpload(StatesGroup):
     waiting_video_file = State()
     waiting_video_description = State()
 
+class BroadcastMediaState(StatesGroup):
+    waiting_broadcast_media = State()
+    confirm_broadcast = State()
+
 # ======================== БД ========================
 async def init_db():
     # Создаём папку data если её нет
@@ -180,6 +184,14 @@ async def init_db():
             file_id TEXT,
             file_name TEXT,
             thumbnail_id TEXT,
+            created_at INTEGER
+        )''')
+
+        await db.execute('''CREATE TABLE IF NOT EXISTS broadcast_media (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_type TEXT,
+            file_id TEXT,
+            caption TEXT,
             created_at INTEGER
         )''')
 
@@ -553,19 +565,20 @@ def get_current_context():
                        "июле", "августе", "сентябре", "октябре", "ноябре", "декабре"][month]
     }
 
-async def get_user_broadcast_history(user_id: int) -> list:
-    """Получает историю категорий сообщений для пользователя"""
+async def get_user_broadcast_history(user_id: int, limit: int = 5) -> list:
+    """Получает последние N категорий сообщений для пользователя (для предотвращения повторений подряд)"""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''CREATE TABLE IF NOT EXISTS broadcast_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             category TEXT,
-            sent_at INTEGER,
-            PRIMARY KEY (user_id, category)
+            sent_at INTEGER
         )''')
         await db.commit()
 
         async with db.execute(
-            'SELECT category FROM broadcast_history WHERE user_id = ?', (user_id,)
+            'SELECT category FROM broadcast_history WHERE user_id = ? ORDER BY sent_at DESC LIMIT ?',
+            (user_id, limit)
         ) as cursor:
             rows = await cursor.fetchall()
             return [r[0] for r in rows]
@@ -600,11 +613,12 @@ def build_smart_prompt(category: str, profile: dict, context: dict) -> str:
 2. НЕ упоминай возраст.
 3. Живой разговорный язык, как друг.
 4. Без канцеляризмов и маркетинговых штампов.
-5. От 70 до 100 слов.
+5. ОБЯЗАТЕЛЬНО минимум 80 слов, максимум 120 слов.
 6. Не начинай с "Привет" — делай интригующее или тёплое начало.
 7. В конце — мягкое приглашение в Кафедру любительского спорта.
 8. Микро-польза: 1 короткий совет по теме.
-9. Можно добавить лёгкую иронию, но без сарказма."""
+9. Можно добавить лёгкую иронию, но без сарказма.
+10. КРИТИЧЕСКИ ВАЖНО: сообщение должно содержать не менее 80 слов."""
 
     season = context['season']
     season_ctx = context['season_context']
@@ -853,19 +867,17 @@ async def generate_subscription_promo(profile: dict = None, user_id: int = None)
             return f"{msg}\n\n💎 <b>Оформи подписку!</b>"
         return "🎿 Начни тренироваться по системе! Подпишись на наш курс.\n\n💎 <b>Оформи подписку!</b>"
 
-    # Получаем историю сообщений пользователя
+    # Получаем последние 5 категорий для предотвращения повторений подряд
     if user_id:
-        used_categories = await get_user_broadcast_history(user_id)
+        recent_categories = await get_user_broadcast_history(user_id, limit=5)
     else:
-        used_categories = []
+        recent_categories = []
 
-    # Находим неиспользованные категории
-    available = [c for c in BROADCAST_CATEGORIES if c not in used_categories]
+    # Находим категории которые НЕ были использованы недавно
+    available = [c for c in BROADCAST_CATEGORIES if c not in recent_categories]
 
-    # Если все использованы - сбрасываем и начинаем заново
+    # Если все недавние категории были использованы - берём все категории
     if not available:
-        if user_id:
-            await reset_user_broadcast_history(user_id)
         available = BROADCAST_CATEGORIES.copy()
 
     # Умный выбор категории на основе контекста
@@ -2100,6 +2112,8 @@ def admin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="🚀 Создать рассылку", callback_data="create_broadcast")],
         [InlineKeyboardButton(text="🤖 AI Рассылка (без подписки)", callback_data="ai_broadcast")],
+        [InlineKeyboardButton(text="🖼 Рассылка с фото", callback_data="broadcast_with_photo")],
+        [InlineKeyboardButton(text="🎥 Рассылка с видео", callback_data="broadcast_with_video")],
         [InlineKeyboardButton(text=broadcast_status, callback_data="toggle_auto_broadcast")],
         [InlineKeyboardButton(text=f"⏰ Интервал: {BROADCAST_INTERVAL_HOURS}ч", callback_data="set_broadcast_interval")],
         [InlineKeyboardButton(text="👁 Превью рассылки (мне)", callback_data="preview_broadcast_me")],
@@ -2541,8 +2555,18 @@ async def subscribe_now_handler(callback: CallbackQuery, state: FSMContext):
 async def pay_button(message: Message):
     text = "💳 <b>Тариф для:</b> 'Кафедра любительского спорта'\n\n"
     text += "При оплате тарифа Вы получите доступ: <i>Кафедра любительского спорта</i>"
-    
+
     await message.answer(text, parse_mode="HTML", reply_markup=tariff_kb())
+
+@router.callback_query(F.data == "pay_subscription")
+async def pay_subscription_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки оплаты из рассылки"""
+    await callback.message.answer(
+        "📱 Для отслеживания подписки отправь свой номер телефона:",
+        reply_markup=phone_kb()
+    )
+    await state.set_state(PhoneState.waiting_phone)
+    await callback.answer()
 
 @router.callback_query(F.data == "tariff_1")
 async def tariff_1_callback(callback: CallbackQuery, state: FSMContext):
@@ -3886,7 +3910,147 @@ class SubscriptionSettings(StatesGroup):
     waiting_secret_word = State()
 
 @router.callback_query(F.data == "set_special_price")
-async def set_special_price_start(callback: CallbackQuery, state: FSMContext):
+async def set_special_price_menu(callback: CallbackQuery):
+    """Показ пользователей с ценой 1111₽ и управление"""
+    if not is_admin(callback.from_user.id):
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        current_time = int(datetime.now().timestamp())
+
+        # Получаем пользователей со спец ценой
+        async with db.execute(
+            '''SELECT user_id, name, username, grace_period_until, subscription_until
+               FROM users WHERE special_price = 1111
+               ORDER BY grace_period_until DESC LIMIT 20''',
+        ) as cursor:
+            users = await cursor.fetchall()
+
+        # Общее количество
+        async with db.execute(
+            'SELECT COUNT(*) FROM users WHERE special_price = 1111'
+        ) as cursor:
+            total_count = (await cursor.fetchone())[0]
+
+    if not users:
+        text = "💰 <b>Пользователи с ценой 1111₽</b>\n\n❌ Нет пользователей со спец ценой"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Установить цену (список ID)", callback_data="set_price_manual")],
+            [InlineKeyboardButton(text="🌐 Установить ВСЕМ на 7 дней", callback_data="set_price_all")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+        ])
+    else:
+        text = f"💰 <b>Пользователи с ценой 1111₽</b>\n\n"
+        text += f"Всего: <b>{total_count}</b> пользователей\n\n"
+
+        for user_id, name, username, grace_until, sub_until in users:
+            display_name = name or username or f"ID {user_id}"
+
+            # Проверяем активность льготного периода
+            if grace_until and grace_until > current_time:
+                grace_date = datetime.fromtimestamp(grace_until).strftime('%d.%m')
+                status = f"✅ до {grace_date}"
+            else:
+                status = "⏰ Истёк"
+
+            # Проверяем подписку
+            if sub_until and sub_until > current_time:
+                sub_status = "💎"
+            else:
+                sub_status = "❌"
+
+            text += f"{sub_status} {display_name} ({status})\n"
+
+        if total_count > 20:
+            text += f"\n<i>Показаны первые 20 из {total_count}</i>"
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏰ Установить на 7 дней", callback_data="set_days_7")],
+            [InlineKeyboardButton(text="⏰ Установить на 14 дней", callback_data="set_days_14")],
+            [InlineKeyboardButton(text="⏰ Установить на 30 дней", callback_data="set_days_30")],
+            [InlineKeyboardButton(text="✏️ Добавить пользователей", callback_data="set_price_manual")],
+            [InlineKeyboardButton(text="🌐 Установить ВСЕМ на 7 дней", callback_data="set_price_all")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+        ])
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("set_days_"))
+async def set_days_for_special_price(callback: CallbackQuery):
+    """Установить количество дней для пользователей с ценой 1111₽"""
+    if not is_admin(callback.from_user.id):
+        return
+
+    # Извлекаем количество дней из callback_data
+    days = int(callback.data.split("_")[2])
+
+    # Считаем сколько пользователей будет обновлено
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            'SELECT COUNT(*) FROM users WHERE special_price = 1111'
+        ) as cursor:
+            count = (await cursor.fetchone())[0]
+
+    if count == 0:
+        await callback.answer("❌ Нет пользователей с ценой 1111₽", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, установить", callback_data=f"confirm_set_days_{days}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="set_special_price")]
+    ])
+
+    await callback.message.edit_text(
+        f"⚠️ <b>Подтверждение</b>\n\n"
+        f"Установить льготный период <b>{days} дней</b>\n"
+        f"для <b>{count}</b> пользователей с ценой 1111₽?",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("confirm_set_days_"))
+async def confirm_set_days(callback: CallbackQuery):
+    """Подтверждение установки дней"""
+    if not is_admin(callback.from_user.id):
+        return
+
+    days = int(callback.data.split("_")[3])
+
+    await callback.message.edit_text("⏳ Устанавливаю льготный период...")
+
+    grace_until = int((datetime.now() + timedelta(days=days)).timestamp())
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            'UPDATE users SET grace_period_until = ? WHERE special_price = 1111',
+            (grace_until,)
+        )
+        await db.commit()
+
+        async with db.execute(
+            'SELECT COUNT(*) FROM users WHERE special_price = 1111'
+        ) as cursor:
+            updated = (await cursor.fetchone())[0]
+
+    grace_date = datetime.fromtimestamp(grace_until).strftime('%d.%m.%Y')
+
+    await callback.message.edit_text(
+        f"✅ <b>Готово!</b>\n\n"
+        f"Обновлено: <b>{updated}</b> пользователей\n"
+        f"Льготный период: <b>{days} дней</b>\n"
+        f"Действует до: <b>{grace_date}</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="set_special_price")]
+        ])
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "set_price_manual")
+async def set_price_manual(callback: CallbackQuery, state: FSMContext):
+    """Установить цену вручную списком"""
     if not is_admin(callback.from_user.id):
         return
 
@@ -3901,6 +4065,61 @@ async def set_special_price_start(callback: CallbackQuery, state: FSMContext):
         "<code>670030071\n"
         "342534630\n"
         "463485998</code>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "set_price_all")
+async def set_price_all_confirm(callback: CallbackQuery):
+    """Подтверждение установки цены всем"""
+    if not is_admin(callback.from_user.id):
+        return
+
+    # Считаем сколько пользователей будет затронуто
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT COUNT(*) FROM users') as cursor:
+            total_users = (await cursor.fetchone())[0]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, установить всем", callback_data="set_price_all_confirmed")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="set_special_price")]
+    ])
+
+    await callback.message.edit_text(
+        f"⚠️ <b>Подтверждение</b>\n\n"
+        f"Установить цену 1111₽ для <b>ВСЕХ {total_users} пользователей</b>?\n\n"
+        f"Льготный период: 7 дней",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "set_price_all_confirmed")
+async def set_price_all_confirmed(callback: CallbackQuery):
+    """Установить цену всем пользователям"""
+    if not is_admin(callback.from_user.id):
+        return
+
+    await callback.message.edit_text("⏳ Устанавливаю цену для всех пользователей...")
+
+    grace_until = int((datetime.now() + timedelta(days=7)).timestamp())
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            'UPDATE users SET special_price = ?, grace_period_until = ?',
+            (1111, grace_until)
+        )
+        await db.commit()
+
+        async with db.execute('SELECT COUNT(*) FROM users') as cursor:
+            updated = (await cursor.fetchone())[0]
+
+    grace_date = datetime.fromtimestamp(grace_until).strftime('%d.%m.%Y')
+
+    await callback.message.edit_text(
+        f"✅ <b>Готово!</b>\n\n"
+        f"Установлена цена 1111₽ для <b>{updated}</b> пользователей\n\n"
+        f"⏰ Льготная цена действует до <b>{grace_date}</b> (7 дней)",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -3921,7 +4140,7 @@ async def process_special_price_list(message: Message, state: FSMContext):
         return
 
     # Устанавливаем специальную цену для всех пользователей
-    grace_until = int((datetime.now() + timedelta(days=365)).timestamp())
+    grace_until = int((datetime.now() + timedelta(days=7)).timestamp())
     updated = 0
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -3939,6 +4158,7 @@ async def process_special_price_list(message: Message, state: FSMContext):
         f"Установлена цена 1111₽ для {updated} пользователей:\n"
         f"{', '.join(user_ids[:10])}"
         f"{'...' if len(user_ids) > 10 else ''}\n\n"
+        f"⏰ Льготная цена действует 7 дней.\n"
         f"Если они не продлят подписку, цена автоматически вернётся к 2222₽.",
         parse_mode="HTML"
     )
@@ -4115,6 +4335,205 @@ async def secret_word_handler(message: Message):
                 "❌ У тебя нет активной подписки.\n\n"
                 "Оплати подписку, чтобы получить доступ к каналу!"
             )
+
+# ======================== РАССЫЛКА С МЕДИА ========================
+@router.callback_query(F.data == "broadcast_with_photo")
+async def broadcast_with_photo_start(callback: CallbackQuery, state: FSMContext):
+    """Начало рассылки с фото"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    await state.update_data(broadcast_media_type="photo")
+    await state.set_state(BroadcastMediaState.waiting_broadcast_media)
+    await callback.message.answer(
+        "🖼 <b>Рассылка с фото</b>\n\n"
+        "Отправь фото для рассылки пользователям без подписки.\n\n"
+        "AI автоматически сгенерирует уникальный текст для каждого пользователя.",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "broadcast_with_video")
+async def broadcast_with_video_start(callback: CallbackQuery, state: FSMContext):
+    """Начало рассылки с видео"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    await state.update_data(broadcast_media_type="video")
+    await state.set_state(BroadcastMediaState.waiting_broadcast_media)
+    await callback.message.answer(
+        "🎥 <b>Рассылка с видео</b>\n\n"
+        "Отправь видео для рассылки пользователям без подписки.\n\n"
+        "AI автоматически сгенерирует уникальный текст для каждого пользователя.",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(BroadcastMediaState.waiting_broadcast_media, F.photo)
+async def broadcast_photo_received(message: Message, state: FSMContext):
+    """Получено фото для рассылки"""
+    if not is_admin(message.from_user.id):
+        return
+
+    photo_id = message.photo[-1].file_id
+    await state.update_data(media_file_id=photo_id)
+
+    # Генерируем превью
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT user_id FROM users WHERE profile_completed=1 AND (subscription_until IS NULL OR subscription_until < ?) LIMIT 1',
+                             (int(datetime.now().timestamp()),)) as cursor:
+            user = await cursor.fetchone()
+
+    preview_text = "🖼 <b>ПРЕВЬЮ РАССЫЛКИ С ФОТО</b>\n\n"
+    if user:
+        profile = await get_user_profile(user[0])
+        if profile:
+            preview_msg = await generate_subscription_promo(profile, user[0])
+            preview_text += f"Пример текста:\n\n{preview_msg}\n\n"
+
+    preview_text += "<i>Каждый пользователь получит уникальное персонализированное сообщение с этим фото.</i>"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить всем без подписки", callback_data="confirm_media_broadcast")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_media_broadcast")]
+    ])
+
+    await message.answer_photo(
+        photo=photo_id,
+        caption=preview_text,
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await state.set_state(BroadcastMediaState.confirm_broadcast)
+
+@router.message(BroadcastMediaState.waiting_broadcast_media, F.video)
+async def broadcast_video_received(message: Message, state: FSMContext):
+    """Получено видео для рассылки"""
+    if not is_admin(message.from_user.id):
+        return
+
+    video_id = message.video.file_id
+    await state.update_data(media_file_id=video_id)
+
+    # Генерируем превью
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT user_id FROM users WHERE profile_completed=1 AND (subscription_until IS NULL OR subscription_until < ?) LIMIT 1',
+                             (int(datetime.now().timestamp()),)) as cursor:
+            user = await cursor.fetchone()
+
+    preview_text = "🎥 <b>ПРЕВЬЮ РАССЫЛКИ С ВИДЕО</b>\n\n"
+    if user:
+        profile = await get_user_profile(user[0])
+        if profile:
+            preview_msg = await generate_subscription_promo(profile, user[0])
+            preview_text += f"Пример текста:\n\n{preview_msg}\n\n"
+
+    preview_text += "<i>Каждый пользователь получит уникальное персонализированное сообщение с этим видео.</i>"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить всем без подписки", callback_data="confirm_media_broadcast")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_media_broadcast")]
+    ])
+
+    await message.answer_video(
+        video=video_id,
+        caption=preview_text,
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await state.set_state(BroadcastMediaState.confirm_broadcast)
+
+@router.callback_query(F.data == "confirm_media_broadcast")
+async def confirm_media_broadcast(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение и отправка рассылки с медиа"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    data = await state.get_data()
+    media_type = data.get('broadcast_media_type')
+    media_file_id = data.get('media_file_id')
+
+    await callback.message.edit_caption(
+        caption="📨 Отправляю персонализированную рассылку с медиа...",
+        parse_mode="HTML"
+    )
+
+    # Получаем всех пользователей без подписки
+    async with aiosqlite.connect(DB_PATH) as db:
+        current_time = int(datetime.now().timestamp())
+        async with db.execute(
+            '''SELECT user_id, name, age, goal, level, lifestyle, weekly_training
+               FROM users WHERE subscription_until IS NULL OR subscription_until < ?''',
+            (current_time,)
+        ) as cursor:
+            users = await cursor.fetchall()
+
+    sent_count = 0
+    for row in users:
+        user_id = row[0]
+        profile = {
+            'name': row[1],
+            'age': row[2],
+            'goal': row[3],
+            'level': row[4],
+            'lifestyle': row[5],
+            'weekly_training': row[6]
+        }
+
+        try:
+            # Генерируем уникальное персонализированное сообщение
+            promo_msg = await generate_subscription_promo(profile, user_id)
+
+            # Кнопка подписки
+            subscribe_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Оформить подписку", callback_data="pay_subscription")]
+            ])
+
+            # Отправляем с медиа
+            if media_type == "photo":
+                await bot.send_photo(
+                    user_id,
+                    photo=media_file_id,
+                    caption=promo_msg,
+                    parse_mode="HTML",
+                    reply_markup=subscribe_kb
+                )
+            elif media_type == "video":
+                await bot.send_video(
+                    user_id,
+                    video=media_file_id,
+                    caption=promo_msg,
+                    parse_mode="HTML",
+                    reply_markup=subscribe_kb
+                )
+
+            sent_count += 1
+            logging.info(f"[MEDIA BROADCAST] Отправлено {profile.get('name', user_id)}")
+            await asyncio.sleep(1.0)  # Задержка для API
+        except Exception as e:
+            logging.error(f"[MEDIA BROADCAST ERROR] User {user_id}: {e}")
+            continue
+
+    await callback.message.edit_caption(
+        caption=f"✅ <b>Рассылка завершена!</b>\n\n"
+                f"📨 Отправлено: {sent_count} персонализированных сообщений с медиа",
+        parse_mode="HTML"
+    )
+    await state.clear()
+    await callback.answer()
+
+@router.callback_query(F.data == "cancel_media_broadcast")
+async def cancel_media_broadcast(callback: CallbackQuery, state: FSMContext):
+    """Отмена рассылки с медиа"""
+    await state.clear()
+    await callback.message.edit_caption(
+        caption="❌ Рассылка отменена",
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin(callback: CallbackQuery):
