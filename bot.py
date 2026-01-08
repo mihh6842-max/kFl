@@ -857,6 +857,53 @@ def build_smart_prompt(category: str, profile: dict, context: dict) -> str:
 
     return prompts.get(category, prompts["motivation_personal"])
 
+# Загрузка локальных fallback-сообщений
+FALLBACK_MESSAGES = []
+
+def load_fallback_messages():
+    global FALLBACK_MESSAGES
+    try:
+        fallback_path = os.path.join(os.path.dirname(__file__), 'fallback_messages.txt')
+        with open(fallback_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            FALLBACK_MESSAGES = [msg.strip() for msg in content.split('\n\n') if msg.strip() and len(msg.strip()) >= 80]
+        logging.info(f"Загружено {len(FALLBACK_MESSAGES)} fallback-сообщений")
+    except Exception as e:
+        logging.error(f"Ошибка загрузки fallback_messages.txt: {e}")
+        FALLBACK_MESSAGES = []
+
+async def get_unique_fallback_message(user_id: int) -> str:
+    """Выбирает fallback сообщение не повторяя предыдущее"""
+    if not FALLBACK_MESSAGES:
+        return None
+    if len(FALLBACK_MESSAGES) == 1:
+        return FALLBACK_MESSAGES[0]
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute('''CREATE TABLE IF NOT EXISTS fallback_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                message_index INTEGER,
+                sent_at INTEGER
+            )''')
+            async with db.execute(
+                'SELECT message_index FROM fallback_history WHERE user_id = ? ORDER BY sent_at DESC LIMIT 1',
+                (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                last_index = row[0] if row else -1
+            available = [i for i in range(len(FALLBACK_MESSAGES)) if i != last_index]
+            index = random.choice(available)
+            await db.execute('DELETE FROM fallback_history WHERE user_id = ?', (user_id,))
+            await db.execute(
+                'INSERT INTO fallback_history (user_id, message_index, sent_at) VALUES (?, ?, ?)',
+                (user_id, index, int(datetime.now().timestamp()))
+            )
+            await db.commit()
+            return FALLBACK_MESSAGES[index]
+    except:
+        return random.choice(FALLBACK_MESSAGES)
+
 async def generate_subscription_promo(profile: dict = None, user_id: int = None) -> str:
     """Генерирует уникальное персонализированное сообщение"""
 
@@ -4091,8 +4138,12 @@ async def process_special_price_list(message: Message, state: FSMContext):
         for user_id_str in user_ids:
             user_id = int(user_id_str)
             await db.execute(
-                'UPDATE users SET special_price = ?, grace_period_until = ? WHERE user_id = ?',
-                (1111, grace_until, user_id)
+                '''INSERT INTO users (user_id, special_price, grace_period_until, created_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                   special_price = excluded.special_price,
+                   grace_period_until = excluded.grace_period_until''',
+                (user_id, 1111, grace_until, int(datetime.now().timestamp()))
             )
             updated += 1
         await db.commit()
