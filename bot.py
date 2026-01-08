@@ -2157,6 +2157,10 @@ def main_kb(admin=False) -> ReplyKeyboardMarkup:
         btns.append([KeyboardButton(text="⚙️ Админ-панель")])
     return ReplyKeyboardMarkup(keyboard=btns, resize_keyboard=True)
 
+def get_admin_panel_text() -> str:
+    """Текст админ-панели с датой последнего обновления"""
+    return "⚙️ <b>Админ-панель</b>\n\n<i>Последнее обновление: 09.01.2026 00:30</i>"
+
 def admin_kb() -> InlineKeyboardMarkup:
     global AUTO_BROADCAST_ENABLED, BROADCAST_INTERVAL_HOURS
     broadcast_status = "✅ ВКЛ" if AUTO_BROADCAST_ENABLED else "❌ ВЫКЛ"
@@ -3009,13 +3013,13 @@ async def process_withdrawal_details(message: Message, state: FSMContext):
 async def admin_panel_button(message: Message):
     if not is_admin(message.from_user.id):
         return
-    await message.answer("⚙️ Админ-панель:", reply_markup=admin_kb())
+    await message.answer(get_admin_panel_text(), reply_markup=admin_kb(), parse_mode="HTML")
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     if not is_admin(message.from_user.id):
         return
-    await message.answer("🔒 Админ-панель:", reply_markup=admin_kb())
+    await message.answer(get_admin_panel_text(), reply_markup=admin_kb(), parse_mode="HTML")
 
 @router.message(Command("setp"))
 async def cmd_setp(message: Message):
@@ -3266,7 +3270,7 @@ async def toggle_auto_broadcast(callback: CallbackQuery):
     AUTO_BROADCAST_ENABLED = not AUTO_BROADCAST_ENABLED
     status = "включена ✅" if AUTO_BROADCAST_ENABLED else "выключена ❌"
     await callback.answer(f"Авто-рассылка {status}", show_alert=True)
-    await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_kb())
+    await callback.message.edit_text(get_admin_panel_text(), reply_markup=admin_kb(), parse_mode="HTML")
 
 @router.callback_query(F.data == "set_broadcast_interval")
 async def set_broadcast_interval(callback: CallbackQuery):
@@ -3300,7 +3304,7 @@ async def set_interval_value(callback: CallbackQuery):
     hours = int(callback.data.split("_")[1])
     BROADCAST_INTERVAL_HOURS = hours
     await callback.answer(f"Интервал установлен: {hours} часов", show_alert=True)
-    await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_kb())
+    await callback.message.edit_text(get_admin_panel_text(), reply_markup=admin_kb(), parse_mode="HTML")
 
 @router.callback_query(F.data == "preview_broadcast_me")
 async def preview_broadcast_me(callback: CallbackQuery):
@@ -3342,7 +3346,7 @@ async def back_to_admin(callback: CallbackQuery):
     """Вернуться в админ панель"""
     if not is_admin(callback.from_user.id):
         return
-    await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_kb())
+    await callback.message.edit_text(get_admin_panel_text(), reply_markup=admin_kb(), parse_mode="HTML")
 
 @router.callback_query(F.data == "ai_broadcast")
 async def ai_broadcast_handler(callback: CallbackQuery):
@@ -3389,7 +3393,7 @@ async def confirm_ai_broadcast(callback: CallbackQuery):
 
     # Возврат в админ-панель через 3 секунды
     await asyncio.sleep(3)
-    await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_kb())
+    await callback.message.edit_text(get_admin_panel_text(), reply_markup=admin_kb(), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "admin_change_photo")
@@ -4124,7 +4128,7 @@ async def process_special_price_list(message: Message, state: FSMContext):
 
     # Извлекаем все числа (user_id) из текста
     import re
-    user_ids = re.findall(r'\d{6,}', text)
+    user_ids = list(set(re.findall(r'\d{6,}', text)))  # убираем дубликаты
 
     if not user_ids:
         await message.answer("❌ Не найдено ни одного User ID. Попробуйте снова.")
@@ -4132,26 +4136,46 @@ async def process_special_price_list(message: Message, state: FSMContext):
 
     # Устанавливаем специальную цену для всех пользователей
     grace_until = int((datetime.now() + timedelta(days=7)).timestamp())
+    created = 0
     updated = 0
 
     async with aiosqlite.connect(DB_PATH) as db:
         for user_id_str in user_ids:
             user_id = int(user_id_str)
-            await db.execute(
-                '''INSERT INTO users (user_id, special_price, grace_period_until, created_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(user_id) DO UPDATE SET
-                   special_price = excluded.special_price,
-                   grace_period_until = excluded.grace_period_until''',
-                (user_id, 1111, grace_until, int(datetime.now().timestamp()))
-            )
-            updated += 1
+
+            # Проверяем существует ли пользователь
+            async with db.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,)) as cursor:
+                exists = await cursor.fetchone()
+
+            if exists:
+                # Обновляем существующего
+                await db.execute(
+                    'UPDATE users SET special_price = ?, grace_period_until = ? WHERE user_id = ?',
+                    (1111, grace_until, user_id)
+                )
+                updated += 1
+            else:
+                # Создаем нового
+                await db.execute(
+                    'INSERT INTO users (user_id, special_price, grace_period_until, created_at) VALUES (?, ?, ?, ?)',
+                    (user_id, 1111, grace_until, int(datetime.now().timestamp()))
+                )
+                created += 1
+
         await db.commit()
+
+    total = created + updated
+    status_text = []
+    if created > 0:
+        status_text.append(f"🆕 Создано новых: {created}")
+    if updated > 0:
+        status_text.append(f"✏️ Обновлено: {updated}")
 
     await message.answer(
         f"✅ <b>Готово!</b>\n\n"
-        f"Установлена цена 1111₽ для {updated} пользователей:\n"
-        f"{', '.join(user_ids[:10])}"
+        f"Установлена цена 1111₽ для {total} пользователей\n"
+        + "\n".join(status_text) + "\n\n"
+        f"ID: {', '.join(user_ids[:10])}"
         f"{'...' if len(user_ids) > 10 else ''}\n\n"
         f"⏰ Льготная цена действует 7 дней.\n"
         f"Если они не продлят подписку, цена автоматически вернётся к 2222₽.",
@@ -4560,7 +4584,7 @@ async def cancel_broadcast(callback: CallbackQuery, state: FSMContext):
 async def back_to_admin(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
-    await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_kb())
+    await callback.message.edit_text(get_admin_panel_text(), reply_markup=admin_kb(), parse_mode="HTML")
     await callback.answer()
 
 # ======================== ЗАПУСК ========================
