@@ -17,8 +17,12 @@ APScheduler>=3.10.0
 aiosqlite>=0.19.0
 
 # ===== PAYMENT PROCESSING =====
-# YooKassa integration
-yookassa>=3.0.0
+# Robokassa integration (замена YooKassa)
+aiohttp>=3.9.0
+
+# ===== AI INTEGRATION =====
+# OpenAI/OpenRouter API
+openai>=1.0.0
 
 # ===== GOOGLE INTEGRATION =====
 # Google Sheets API
