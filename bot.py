@@ -104,6 +104,11 @@ class WithdrawalState(StatesGroup):
 class SetPriceState(StatesGroup):
     waiting_user_list = State()
 
+class GrantSubscriptionState(StatesGroup):
+    waiting_user_id = State()
+    waiting_days = State()
+    confirm_notification = State()
+
 class ContentUpload(StatesGroup):
     waiting_pdf_category = State()
     waiting_pdf_file = State()
@@ -997,7 +1002,10 @@ async def generate_subscription_promo(profile: dict = None, user_id: int = None)
         ]
         return f"{msg}\n\n{random.choice(ctas)}"
     else:
-        # Фолбэк
+        # Если AI не сработал - берём fallback
+        fallback = await get_unique_fallback_message(user_id) if user_id else None
+        if fallback:
+            return f"{fallback}\n\n💎 <b>Оформи подписку!</b>"
         name = profile.get('name', '')
         return f"""🎿 <b>{name}, время действовать!</b>
 
@@ -2168,6 +2176,7 @@ def admin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📨 Рассылка", callback_data="broadcast_menu")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
          InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
+        [InlineKeyboardButton(text="✅ Выдать подписку", callback_data="grant_subscription")],
         [InlineKeyboardButton(text="💰 Цена 1111₽", callback_data="set_special_price"),
          InlineKeyboardButton(text="📚 Контент", callback_data="view_content")],
         [InlineKeyboardButton(text=f"🤖 AI Авто: {broadcast_status}", callback_data="toggle_auto_broadcast")],
@@ -4587,9 +4596,143 @@ async def back_to_admin(callback: CallbackQuery):
     await callback.message.edit_text(get_admin_panel_text(), reply_markup=admin_kb(), parse_mode="HTML")
     await callback.answer()
 
+# ======================== ВЫДАЧА ПОДПИСКИ ========================
+@router.callback_query(F.data == "grant_subscription")
+async def grant_subscription_start(callback: CallbackQuery, state: FSMContext):
+    """Начало выдачи подписки"""
+    if not is_admin(callback.from_user.id):
+        return
+
+    await callback.message.answer(
+        "✅ <b>Выдача подписки</b>\n\n"
+        "Отправьте User ID пользователя:",
+        parse_mode="HTML"
+    )
+    await state.set_state(GrantSubscriptionState.waiting_user_id)
+    await callback.answer()
+
+@router.message(GrantSubscriptionState.waiting_user_id)
+async def process_grant_user_id(message: Message, state: FSMContext):
+    """Обработка user_id"""
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+        user_id = int(message.text.strip())
+        await state.update_data(user_id=user_id)
+
+        await message.answer(
+            f"👤 User ID: <code>{user_id}</code>\n\n"
+            "📅 Отправьте количество дней подписки:",
+            parse_mode="HTML"
+        )
+        await state.set_state(GrantSubscriptionState.waiting_days)
+
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите числовой User ID:")
+
+@router.message(GrantSubscriptionState.waiting_days)
+async def process_grant_days(message: Message, state: FSMContext):
+    """Обработка количества дней и запрос уведомления"""
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+        days = int(message.text.strip())
+        if days <= 0:
+            await message.answer("❌ Количество дней должно быть больше 0")
+            return
+
+        data = await state.get_data()
+        user_id = data['user_id']
+
+        await state.update_data(days=days)
+
+        until_date = (datetime.now() + timedelta(days=days)).strftime('%d.%m.%Y %H:%M')
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, уведомить", callback_data="grant_notify_yes")],
+            [InlineKeyboardButton(text="❌ Нет, не уведомлять", callback_data="grant_notify_no")]
+        ])
+
+        await message.answer(
+            f"📋 <b>Подтверждение</b>\n\n"
+            f"🆔 User ID: <code>{user_id}</code>\n"
+            f"📅 Дней: {days}\n"
+            f"⏰ До: {until_date}\n\n"
+            f"Уведомить пользователя?",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите количество дней числом:")
+
+@router.callback_query(F.data.startswith("grant_notify_"))
+async def process_grant_confirm(callback: CallbackQuery, state: FSMContext):
+    """Выдача подписки с уведомлением или без"""
+    if not is_admin(callback.from_user.id):
+        return
+
+    notify = callback.data == "grant_notify_yes"
+    data = await state.get_data()
+    user_id = data['user_id']
+    days = data['days']
+
+    # Проверяем существует ли пользователь
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT user_id, name, username FROM users WHERE user_id = ?', (user_id,)) as cursor:
+            user = await cursor.fetchone()
+
+        if not user:
+            # Создаем пользователя если не существует
+            await db.execute(
+                'INSERT INTO users (user_id, created_at) VALUES (?, ?)',
+                (user_id, int(datetime.now().timestamp()))
+            )
+            await db.commit()
+            user_name = f"ID {user_id}"
+        else:
+            user_name = user[1] or user[2] or f"ID {user_id}"
+
+    # Активируем подписку
+    await activate_subscription(user_id, days)
+
+    until_date = (datetime.now() + timedelta(days=days)).strftime('%d.%m.%Y %H:%M')
+
+    result_text = (
+        f"✅ <b>Подписка выдана!</b>\n\n"
+        f"👤 Пользователь: {user_name}\n"
+        f"🆔 User ID: <code>{user_id}</code>\n"
+        f"📅 Дней: {days}\n"
+        f"⏰ Действует до: {until_date}"
+    )
+
+    # Уведомляем пользователя если нужно
+    if notify:
+        try:
+            await bot.send_message(
+                user_id,
+                f"🎉 <b>Вам выдана подписка!</b>\n\n"
+                f"📅 Срок: {days} дней\n"
+                f"⏰ Действует до: {until_date}\n\n"
+                f"Теперь у вас есть полный доступ ко всем материалам!",
+                parse_mode="HTML"
+            )
+            result_text += "\n\n✅ Пользователь уведомлен"
+        except Exception as e:
+            result_text += f"\n\n⚠️ Не удалось уведомить: {e}"
+    else:
+        result_text += "\n\n🔕 Пользователь не уведомлен"
+
+    await callback.message.edit_text(result_text, parse_mode="HTML")
+    await state.clear()
+    await callback.answer()
+
 # ======================== ЗАПУСК ========================
 async def main():
     await init_db()
+    load_fallback_messages()
     dp.include_router(router)
 
     # Первый экспорт при запуске
