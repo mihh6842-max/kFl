@@ -4793,9 +4793,22 @@ async def back_to_admin(callback: CallbackQuery):
     await callback.answer()
 
 # ======================== ВЫДАЧА ПОДПИСКИ ========================
+@router.message(Command("grant"))
+async def grant_subscription_command(message: Message, state: FSMContext):
+    """Команда для выдачи подписки"""
+    if not is_admin(message.from_user.id):
+        return
+
+    await message.answer(
+        "✅ <b>Выдача подписки</b>\n\n"
+        "Отправьте User ID пользователя:",
+        parse_mode="HTML"
+    )
+    await state.set_state(GrantSubscriptionState.waiting_user_id)
+
 @router.callback_query(F.data == "grant_subscription")
 async def grant_subscription_start(callback: CallbackQuery, state: FSMContext):
-    """Начало выдачи подписки"""
+    """Начало выдачи подписки через кнопку"""
     if not is_admin(callback.from_user.id):
         return
 
