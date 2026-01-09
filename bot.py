@@ -61,6 +61,7 @@ YOOKASSA_SECRET_KEY = env.get('YOOKASSA_SECRET_KEY', "live_62wmjnZ9ytjqZonaLiNw3
 CHANNEL_ID = -1002284489725  # Группа КЛС
 FALLBACK_CHANNEL_LINK = "https://t.me/+iD8NwG9tfakwNzJi"  # Запасная ссылка
 ADMIN_IDS = [7338817463, 1478525032, 853335233]
+NOTIFY_GROUP_ID = -1002284489725  # Группа для уведомлений о киках (укажи ID группы)
 PRICE_1_MONTH = 2222  # Стандартная цена для новых пользователей
 AUTO_BROADCAST_ENABLED = True  # Автоматическая рассылка вкл/выкл
 BROADCAST_INTERVAL_HOURS = 10  # Интервал авто-рассылки в часах
@@ -1240,6 +1241,29 @@ async def check_and_kick_expired_users():
                 )
                 kicked += 1
                 logging.info(f"[KICK] Успешно кикнут {name} (ID: {user_id})")
+
+                # Уведомляем в группу об успешном удалении
+                async with aiosqlite.connect(DB_PATH) as db:
+                    async with db.execute('SELECT username FROM users WHERE user_id = ?', (user_id,)) as cursor:
+                        user_row = await cursor.fetchone()
+                        username = user_row[0] if user_row and user_row[0] else "нет"
+
+                try:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="👤 Открыть профиль", url=f"tg://user?id={user_id}")]
+                    ])
+                    await bot.send_message(
+                        NOTIFY_GROUP_ID,
+                        f"🚫 <b>Пользователь удален из канала</b>\n\n"
+                        f"👤 Имя: {name or 'Не указано'}\n"
+                        f"🆔 ID: <code>{user_id}</code>\n"
+                        f"📱 Username: @{username}\n"
+                        f"⏰ Причина: Истекла подписка",
+                        parse_mode="HTML",
+                        reply_markup=kb
+                    )
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление в группу: {e}")
             except Exception as ban_err:
                 logging.warning(f"[KICK] Не удалось кикнуть {name}: {ban_err}")
                 # Уведомляем админов что нужно кикнуть вручную
