@@ -3097,9 +3097,15 @@ async def withdrawal_request(callback: CallbackQuery, state: FSMContext):
     await state.update_data(amount=earnings)
 
     # Отправляем PDF с положением
-    pdf_path = r"C:\Users\admin\Desktop\KLS_bot\data\ПОЛОЖЕНИЕ_О_РЕФЕРАЛЬНОЙ_ПРОГРАММЕ.pdf"
+    pdf_path = os.path.join(os.path.dirname(__file__), 'data', 'ПОЛОЖЕНИЕ_О_РЕФЕРАЛЬНОЙ_ПРОГРАММЕ.pdf')
 
     try:
+        if not os.path.exists(pdf_path):
+            await callback.message.answer("❌ Файл с положением не найден. Обратитесь к администратору.")
+            await state.clear()
+            await callback.answer()
+            return
+
         with open(pdf_path, 'rb') as pdf_file:
             await callback.message.answer_document(
                 FSInputFile(pdf_path),
