@@ -99,6 +99,7 @@ class PhoneState(StatesGroup):
     waiting_phone = State()
 
 class WithdrawalState(StatesGroup):
+    waiting_agreement = State()
     waiting_details = State()
 
 class SetPriceState(StatesGroup):
@@ -608,6 +609,27 @@ async def reset_user_broadcast_history(user_id: int):
         await db.execute('DELETE FROM broadcast_history WHERE user_id = ?', (user_id,))
         await db.commit()
 
+def detect_gender_by_name(name: str) -> str:
+    """Определяет пол по имени на основе окончаний"""
+    if not name:
+        return "мужской"
+
+    name_lower = name.lower().strip()
+
+    # Женские окончания
+    female_endings = ['а', 'я', 'ина', 'ия']
+    # Исключения - мужские имена на -а/-я
+    male_exceptions = ['илья', 'никита', 'данила', 'лёва', 'савва', 'фома', 'кузя', 'ваня', 'дима', 'гриша', 'миша', 'саша', 'женя', 'валя']
+
+    if name_lower in male_exceptions:
+        return "мужской"
+
+    for ending in female_endings:
+        if name_lower.endswith(ending):
+            return "женский"
+
+    return "мужской"
+
 def build_smart_prompt(category: str, profile: dict, context: dict) -> str:
     """Строит умный промпт для конкретной категории"""
 
@@ -616,6 +638,10 @@ def build_smart_prompt(category: str, profile: dict, context: dict) -> str:
     level = profile.get('level', 'любитель')
     goal = profile.get('goal', 'улучшить форму')
     lifestyle = profile.get('lifestyle', '')
+
+    # Определяем пол по имени
+    gender = detect_gender_by_name(name)
+    gender_instruction = "ОБЯЗАТЕЛЬНО используй женский род (ты знаешь, тебе нужно, ты можешь, твоя техника)" if gender == "женский" else "Используй мужской род (ты знаешь, тебе нужно, ты можешь, твоя техника)"
 
     # Базовые правила грамматики
     base_rules = f"""СТРОГИЕ ПРАВИЛА:
@@ -628,7 +654,8 @@ def build_smart_prompt(category: str, profile: dict, context: dict) -> str:
 7. В конце — мягкое приглашение в Кафедру любительского спорта.
 8. Микро-польза: 1 короткий совет по теме.
 9. Можно добавить лёгкую иронию, но без сарказма.
-10. КРИТИЧЕСКИ ВАЖНО: сообщение должно содержать не менее 80 слов."""
+10. КРИТИЧЕСКИ ВАЖНО: сообщение должно содержать не менее 80 слов.
+11. {gender_instruction}"""
 
     season = context['season']
     season_ctx = context['season_context']
@@ -2603,11 +2630,49 @@ async def more_about_kls_handler(callback: CallbackQuery):
 # Обработчик "Оформить подписку"
 @router.callback_query(F.data == "subscribe_now")
 async def subscribe_now_handler(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer(
-        "📱 Для отслеживания подписки отправь свой номер телефона:",
-        reply_markup=phone_kb()
-    )
-    await state.set_state(PhoneState.waiting_phone)
+    user_id = callback.from_user.id
+    keyboard = main_kb(is_admin(user_id))
+    price = await get_user_price(user_id)
+
+    try:
+        def create_payment_sync():
+            return Payment.create({
+                "amount": {"value": f"{price}.00", "currency": "RUB"},
+                "confirmation": {"type": "redirect", "return_url": f"https://t.me/djfkjf_bot"},
+                "capture": True,
+                "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                "receipt": {
+                    "customer": {"email": "user@example.com"},
+                    "items": [{
+                        "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                        "quantity": "1",
+                        "amount": {"value": f"{price}.00", "currency": "RUB"},
+                        "vat_code": 1
+                    }]
+                },
+                "metadata": {"user_id": user_id}
+            }, str(uuid.uuid4()))
+
+        payment = await asyncio.to_thread(create_payment_sync)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                'INSERT INTO payments (user_id, payment_id, amount, status, created_at) VALUES (?, ?, ?, ?, ?)',
+                (user_id, payment.id, price, 'pending', int(datetime.now().timestamp()))
+            )
+            await db.commit()
+
+        buttons = [[InlineKeyboardButton(text="💳 Оплатить", url=payment.confirmation.confirmation_url)]]
+        await callback.message.answer(
+            f"💰 Счет на оплату создан!\n\nСумма: {price} ₽\nНажмите кнопку ниже для оплаты:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+        asyncio.create_task(check_payment(payment.id, user_id))
+
+    except Exception as e:
+        logging.error(f"Ошибка создания платежа: {e}")
+        await callback.message.answer("❌ Ошибка создания платежа. Попробуйте позже.", reply_markup=keyboard)
+
     await callback.answer()
 
 # ======================== МЕНЮ ========================
@@ -2621,20 +2686,96 @@ async def pay_button(message: Message):
 @router.callback_query(F.data == "pay_subscription")
 async def pay_subscription_callback(callback: CallbackQuery, state: FSMContext):
     """Обработчик кнопки оплаты из рассылки"""
-    await callback.message.answer(
-        "📱 Для отслеживания подписки отправь свой номер телефона:",
-        reply_markup=phone_kb()
-    )
-    await state.set_state(PhoneState.waiting_phone)
+    user_id = callback.from_user.id
+    keyboard = main_kb(is_admin(user_id))
+    price = await get_user_price(user_id)
+
+    try:
+        def create_payment_sync():
+            return Payment.create({
+                "amount": {"value": f"{price}.00", "currency": "RUB"},
+                "confirmation": {"type": "redirect", "return_url": f"https://t.me/djfkjf_bot"},
+                "capture": True,
+                "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                "receipt": {
+                    "customer": {"email": "user@example.com"},
+                    "items": [{
+                        "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                        "quantity": "1",
+                        "amount": {"value": f"{price}.00", "currency": "RUB"},
+                        "vat_code": 1
+                    }]
+                },
+                "metadata": {"user_id": user_id}
+            }, str(uuid.uuid4()))
+
+        payment = await asyncio.to_thread(create_payment_sync)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                'INSERT INTO payments (user_id, payment_id, amount, status, created_at) VALUES (?, ?, ?, ?, ?)',
+                (user_id, payment.id, price, 'pending', int(datetime.now().timestamp()))
+            )
+            await db.commit()
+
+        buttons = [[InlineKeyboardButton(text="💳 Оплатить", url=payment.confirmation.confirmation_url)]]
+        await callback.message.answer(
+            f"💰 Счет на оплату создан!\n\nСумма: {price} ₽\nНажмите кнопку ниже для оплаты:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+        asyncio.create_task(check_payment(payment.id, user_id))
+
+    except Exception as e:
+        logging.error(f"Ошибка создания платежа: {e}")
+        await callback.message.answer("❌ Ошибка создания платежа. Попробуйте позже.", reply_markup=keyboard)
+
     await callback.answer()
 
 @router.callback_query(F.data == "tariff_1")
 async def tariff_1_callback(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer(
-        "📱 Для отслеживания подписки отправь свой номер телефона:",
-        reply_markup=phone_kb()
-    )
-    await state.set_state(PhoneState.waiting_phone)
+    user_id = callback.from_user.id
+    keyboard = main_kb(is_admin(user_id))
+    price = await get_user_price(user_id)
+
+    try:
+        def create_payment_sync():
+            return Payment.create({
+                "amount": {"value": f"{price}.00", "currency": "RUB"},
+                "confirmation": {"type": "redirect", "return_url": f"https://t.me/djfkjf_bot"},
+                "capture": True,
+                "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                "receipt": {
+                    "customer": {"email": "user@example.com"},
+                    "items": [{
+                        "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                        "quantity": "1",
+                        "amount": {"value": f"{price}.00", "currency": "RUB"},
+                        "vat_code": 1
+                    }]
+                },
+                "metadata": {"user_id": user_id}
+            }, str(uuid.uuid4()))
+
+        payment = await asyncio.to_thread(create_payment_sync)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                'INSERT INTO payments (user_id, payment_id, amount, status, created_at) VALUES (?, ?, ?, ?, ?)',
+                (user_id, payment.id, price, 'pending', int(datetime.now().timestamp()))
+            )
+            await db.commit()
+
+        buttons = [[InlineKeyboardButton(text="💳 Оплатить", url=payment.confirmation.confirmation_url)]]
+        await callback.message.answer(
+            f"💰 Счет на оплату создан!\n\nСумма: {price} ₽\nНажмите кнопку ниже для оплаты:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+        asyncio.create_task(check_payment(payment.id, user_id))
+
+    except Exception as e:
+        logging.error(f"Ошибка создания платежа: {e}")
+        await callback.message.answer("❌ Ошибка создания платежа. Попробуйте позже.", reply_markup=keyboard)
+
     await callback.answer()
 
 @router.message(PhoneState.waiting_phone, F.contact)
@@ -2940,16 +3081,65 @@ async def withdrawal_request(callback: CallbackQuery, state: FSMContext):
 
             earnings = row[0]
 
-    await state.set_state(WithdrawalState.waiting_details)
+    await state.set_state(WithdrawalState.waiting_agreement)
     await state.update_data(amount=earnings)
 
+    # Отправляем PDF с положением
+    pdf_path = r"C:\Users\admin\Desktop\KLS_bot\data\ПОЛОЖЕНИЕ_О_РЕФЕРАЛЬНОЙ_ПРОГРАММЕ.pdf"
+
+    try:
+        with open(pdf_path, 'rb') as pdf_file:
+            await callback.message.answer_document(
+                FSInputFile(pdf_path),
+                caption=(
+                    f"💸 <b>Вывод средств</b>\n\n"
+                    f"Сумма к выводу: {earnings:.2f}₽\n\n"
+                    f"📄 Ознакомьтесь с положением о реферальной программе.\n\n"
+                    f"Вы принимаете условия?"
+                ),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Принимаю", callback_data="accept_withdrawal_terms")],
+                    [InlineKeyboardButton(text="❌ Отказаться", callback_data="decline_withdrawal_terms")]
+                ])
+            )
+    except FileNotFoundError:
+        await callback.message.answer(
+            "❌ Файл с положением не найден. Обратитесь к администратору."
+        )
+        await state.clear()
+        return
+
+    await callback.answer()
+
+@router.callback_query(F.data == "accept_withdrawal_terms")
+async def accept_withdrawal_terms(callback: CallbackQuery, state: FSMContext):
+    """Пользователь принял условия"""
+    data = await state.get_data()
+    earnings = data.get('amount', 0)
+
+    await state.set_state(WithdrawalState.waiting_details)
+
     await callback.message.answer(
-        f"💸 <b>Вывод средств</b>\n\n"
-        f"Сумма к выводу: {earnings:.2f}₽\n\n"
+        f"✅ <b>Условия приняты</b>\n\n"
+        f"💸 Сумма к выводу: {earnings:.2f}₽\n\n"
         f"Пожалуйста, отправьте реквизиты в формате:\n\n"
         f"<code>Номер карты\nБанк\nФИО</code>\n\n"
         f"<b>Пример:</b>\n"
         f"<code>1234 5678 9012 3456\nСбербанк\nИванов Иван Иванович</code>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "decline_withdrawal_terms")
+async def decline_withdrawal_terms(callback: CallbackQuery, state: FSMContext):
+    """Пользователь отказался от условий"""
+    await state.clear()
+
+    await callback.message.answer(
+        "❌ <b>Вывод средств отменён</b>\n\n"
+        "Для вывода средств необходимо принять условия реферальной программы.\n\n"
+        "Попробуйте снова когда будете готовы.",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -4329,9 +4519,15 @@ async def set_secret_word_handler(message: Message, state: FSMContext):
 
 # ======================== ОБРАБОТЧИК КОДОВОГО СЛОВА ========================
 @router.message(F.text)
-async def secret_word_handler(message: Message):
+async def secret_word_handler(message: Message, state: FSMContext):
     """Проверка кодового слова для получения ссылки на канал"""
     user_id = message.from_user.id
+
+    # Если есть активное состояние FSM - пропускаем этот обработчик
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
     text = message.text.strip().lower()
 
     secret_word = await get_secret_word()
@@ -4711,15 +4907,32 @@ async def process_grant_confirm(callback: CallbackQuery, state: FSMContext):
     # Уведомляем пользователя если нужно
     if notify:
         try:
-            await bot.send_message(
-                user_id,
-                f"🎉 <b>Вам выдана подписка!</b>\n\n"
-                f"📅 Срок: {days} дней\n"
-                f"⏰ Действует до: {until_date}\n\n"
-                f"Теперь у вас есть полный доступ ко всем материалам!",
-                parse_mode="HTML"
-            )
-            result_text += "\n\n✅ Пользователь уведомлен"
+            # Генерируем одноразовую ссылку
+            invite_link = await generate_one_time_invite()
+
+            if invite_link:
+                await bot.send_message(
+                    user_id,
+                    f"🎉 <b>Вам выдана подписка!</b>\n\n"
+                    f"📅 Срок: {days} дней\n"
+                    f"⏰ Действует до: {until_date}\n\n"
+                    f"🔗 <b>Ваша персональная ссылка на канал:</b>\n{invite_link}\n\n"
+                    f"⚠️ Ссылка одноразовая - используй её только для себя!\n\n"
+                    f"Добро пожаловать в КЛС!",
+                    parse_mode="HTML"
+                )
+                result_text += "\n\n✅ Пользователь уведомлен с одноразовой ссылкой"
+            else:
+                # Если не удалось создать одноразовую ссылку
+                await bot.send_message(
+                    user_id,
+                    f"🎉 <b>Вам выдана подписка!</b>\n\n"
+                    f"📅 Срок: {days} дней\n"
+                    f"⏰ Действует до: {until_date}\n\n"
+                    f"Теперь у вас есть полный доступ ко всем материалам!",
+                    parse_mode="HTML"
+                )
+                result_text += "\n\n✅ Пользователь уведомлен (без ссылки)"
         except Exception as e:
             result_text += f"\n\n⚠️ Не удалось уведомить: {e}"
     else:
