@@ -2210,6 +2210,7 @@ def admin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✅ Выдать подписку", callback_data="grant_subscription")],
         [InlineKeyboardButton(text="💰 Цена 1111₽", callback_data="set_special_price"),
          InlineKeyboardButton(text="📚 Контент", callback_data="view_content")],
+        [InlineKeyboardButton(text="🎬 Приветственное медиа", callback_data="change_welcome_media")],
         [InlineKeyboardButton(text=f"🤖 AI Авто: {broadcast_status}", callback_data="toggle_auto_broadcast")],
         [InlineKeyboardButton(text=f"⏰ Интервал: {BROADCAST_INTERVAL_HOURS}ч", callback_data="set_broadcast_interval")],
         [InlineKeyboardButton(text="📊 Google Таблицы", callback_data="export_menu")],
