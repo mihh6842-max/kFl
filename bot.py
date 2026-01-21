@@ -1971,6 +1971,7 @@ def admin_kb() -> InlineKeyboardMarkup:
     broadcast_status = "✅ Авто-рассылка ВКЛ" if AUTO_BROADCAST_ENABLED else "❌ Авто-рассылка ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="💎 Выдать подписку", callback_data="give_subscription")],
         [InlineKeyboardButton(text="🚀 Создать рассылку", callback_data="create_broadcast")],
         [InlineKeyboardButton(text="🤖 AI Рассылка (без подписки)", callback_data="ai_broadcast")],
         [InlineKeyboardButton(text=broadcast_status, callback_data="toggle_auto_broadcast")],
@@ -3538,6 +3539,11 @@ class SubscriptionSettings(StatesGroup):
     waiting_paid_video = State()
     waiting_secret_word = State()
 
+class GiveSubscriptionState(StatesGroup):
+    waiting_user_id = State()
+    waiting_days = State()
+    waiting_confirmation = State()
+
 @router.callback_query(F.data == "subscription_settings")
 async def subscription_settings_menu(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -3715,6 +3721,144 @@ async def back_to_admin(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
     await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=admin_kb())
+    await callback.answer()
+
+# ======================== ВЫДАЧА ПОДПИСКИ ========================
+@router.callback_query(F.data == "give_subscription")
+async def give_subscription_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "💎 <b>Выдача подписки</b>\n\n"
+        "Введи USER ID пользователя:",
+        parse_mode="HTML"
+    )
+    await state.set_state(GiveSubscriptionState.waiting_user_id)
+    await callback.answer()
+
+@router.message(GiveSubscriptionState.waiting_user_id)
+async def give_subscription_user_id(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+        user_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Неверный формат! Введи числовой USER ID:")
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT name, username FROM users WHERE user_id = ?', (user_id,)) as cursor:
+            user = await cursor.fetchone()
+
+    if not user:
+        await message.answer(
+            f"❌ Пользователь с ID <code>{user_id}</code> не найден в базе.\n\n"
+            "Попробуй другой ID или отмени командой /admin",
+            parse_mode="HTML"
+        )
+        return
+
+    name, username = user
+    username_text = f"@{username}" if username else "нет username"
+
+    await state.update_data(user_id=user_id, name=name, username=username)
+
+    await message.answer(
+        f"💎 <b>Выдача подписки</b>\n\n"
+        f"👤 Пользователь: {name}\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"📱 Username: {username_text}\n\n"
+        f"Введи количество дней подписки (например: 7, 30, 365):",
+        parse_mode="HTML"
+    )
+    await state.set_state(GiveSubscriptionState.waiting_days)
+
+@router.message(GiveSubscriptionState.waiting_days)
+async def give_subscription_days(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+        days = int(message.text.strip())
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Неверный формат! Введи положительное число дней:")
+        return
+
+    data = await state.get_data()
+    user_id = data.get('user_id')
+    name = data.get('name')
+    username = data.get('username')
+    username_text = f"@{username}" if username else "нет username"
+
+    await state.update_data(days=days)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, отправить", callback_data="give_sub_notify_yes")],
+        [InlineKeyboardButton(text="❌ Нет, не отправлять", callback_data="give_sub_notify_no")],
+        [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_to_admin")]
+    ])
+
+    await message.answer(
+        f"💎 <b>Подтверждение выдачи подписки</b>\n\n"
+        f"👤 Пользователь: {name}\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"📱 Username: {username_text}\n"
+        f"📅 Срок: <b>{days} дней</b>\n\n"
+        f"Отправить пользователю уведомление со ссылкой на канал?",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await state.set_state(GiveSubscriptionState.waiting_confirmation)
+
+@router.callback_query(F.data.in_(["give_sub_notify_yes", "give_sub_notify_no"]))
+async def give_subscription_confirm(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    data = await state.get_data()
+    user_id = data.get('user_id')
+    name = data.get('name')
+    days = data.get('days', 30)
+    notify = callback.data == "give_sub_notify_yes"
+
+    invite_link = await activate_subscription(user_id, days)
+
+    if notify and invite_link:
+        try:
+            await bot.send_message(
+                user_id,
+                f"🎉 <b>Поздравляем!</b>\n\n"
+                f"Тебе выдана подписка на {days} дней!\n\n"
+                f"Вот твоя персональная ссылка на канал:\n{invite_link}\n\n"
+                f"⚠️ Ссылка одноразовая - используй её только для себя!\n\n"
+                f"Добро пожаловать в КЛС!",
+                parse_mode="HTML"
+            )
+            status = "✅ Подписка выдана, пользователь уведомлен"
+        except Exception as e:
+            status = f"✅ Подписка выдана, но не удалось отправить уведомление: {e}"
+    else:
+        status = "✅ Подписка выдана без уведомления"
+
+    await callback.message.edit_text(
+        f"💎 <b>Результат</b>\n\n"
+        f"{status}\n\n"
+        f"👤 Пользователь: {name}\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"⏰ Срок: {days} дней",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Админ-панель", callback_data="back_to_admin")]
+        ])
+    )
+
+    await state.clear()
     await callback.answer()
 
 # ======================== ЗАПУСК ========================
