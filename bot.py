@@ -58,7 +58,20 @@ AI_MODEL = env.get('MODEL', 'google/gemma-3-27b-it:free')
 Configuration.account_id = YOOKASSA_SHOP_ID
 Configuration.secret_key = YOOKASSA_SECRET_KEY
 
-logging.basicConfig(level=logging.INFO)
+log_filename = datetime.now().strftime('logs/bot_%Y-%m-%d_%H-%M-%S.log')
+import os
+os.makedirs('logs', exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename, mode='w', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logging.info(f"Лог файл создан: {log_filename}")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
