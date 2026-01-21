@@ -1978,18 +1978,16 @@ def admin_kb() -> InlineKeyboardMarkup:
     global AUTO_BROADCAST_ENABLED
     broadcast_status = "✅ Авто-рассылка ВКЛ" if AUTO_BROADCAST_ENABLED else "❌ Авто-рассылка ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="💎 Выдать подписку", callback_data="give_subscription")],
-        [InlineKeyboardButton(text="💰 Установить цену 1111₽", callback_data="set_special_price_bulk")],
-        [InlineKeyboardButton(text="🚀 Создать рассылку", callback_data="create_broadcast")],
-        [InlineKeyboardButton(text="🤖 AI Рассылка (без подписки)", callback_data="ai_broadcast")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
+         InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
+        [InlineKeyboardButton(text="💎 Выдать подписку", callback_data="give_subscription"),
+         InlineKeyboardButton(text="💰 Цена 1111₽", callback_data="set_special_price_bulk")],
+        [InlineKeyboardButton(text="🚀 Рассылка", callback_data="create_broadcast"),
+         InlineKeyboardButton(text="🤖 AI Рассылка", callback_data="ai_broadcast")],
         [InlineKeyboardButton(text=broadcast_status, callback_data="toggle_auto_broadcast")],
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
-        [InlineKeyboardButton(text="📄 Загрузить PDF (Тренировки)", callback_data="upload_pdf")],
-        [InlineKeyboardButton(text="🎥 Загрузить видео (Лекции)", callback_data="upload_video")],
-        [InlineKeyboardButton(text="📚 Просмотр контента", callback_data="view_content")],
-        [InlineKeyboardButton(text="📊 Экспорт в Google Таблицы", callback_data="export_menu")],
-        [InlineKeyboardButton(text="🎬 Приветственное медиа", callback_data="change_welcome_media")],
+        [InlineKeyboardButton(text="📚 Контент", callback_data="view_content"),
+         InlineKeyboardButton(text="🎬 Медиа", callback_data="change_welcome_media")],
+        [InlineKeyboardButton(text="📊 Google Sheets", callback_data="export_menu")],
         [InlineKeyboardButton(text="⚙️ Настройки подписки", callback_data="subscription_settings")]
     ])
 
