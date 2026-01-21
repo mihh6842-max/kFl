@@ -3680,42 +3680,6 @@ async def set_secret_word_handler(message: Message, state: FSMContext):
     await state.clear()
 
 # ======================== ОБРАБОТЧИК КОДОВОГО СЛОВА ========================
-@router.message(F.text)
-async def secret_word_handler(message: Message):
-    """Проверка кодового слова для получения ссылки на канал"""
-    user_id = message.from_user.id
-    text = message.text.strip().lower()
-
-    secret_word = await get_secret_word()
-
-    if text == secret_word:
-        # Проверяем есть ли активная подписка
-        if await has_active_subscription(user_id):
-            # Генерируем одноразовую ссылку
-            invite_link = await generate_one_time_invite()
-
-            if invite_link:
-                await message.answer(
-                    f"🎉 <b>Поздравляем!</b>\n\n"
-                    f"Вот твоя персональная ссылка на канал:\n{invite_link}\n\n"
-                    f"⚠️ Ссылка одноразовая - используй её только для себя!\n\n"
-                    f"Добро пожаловать в КЛС!",
-                    parse_mode="HTML"
-                )
-            else:
-                # Если не удалось создать ссылку - используем запасную
-                await message.answer(
-                    f"🎉 <b>Поздравляем!</b>\n\n"
-                    f"Вот ссылка на канал:\n{FALLBACK_CHANNEL_LINK}\n\n"
-                    f"Добро пожаловать в КЛС!",
-                    parse_mode="HTML"
-                )
-        else:
-            await message.answer(
-                "❌ У тебя нет активной подписки.\n\n"
-                "Оплати подписку, чтобы получить доступ к каналу!"
-            )
-
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -3726,6 +3690,8 @@ async def back_to_admin(callback: CallbackQuery):
 # ======================== ВЫДАЧА ПОДПИСКИ ========================
 @router.callback_query(F.data == "give_subscription")
 async def give_subscription_start(callback: CallbackQuery, state: FSMContext):
+    logging.info(f"[GIVE_SUB] Кнопка нажата админом {callback.from_user.id}")
+
     if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещен", show_alert=True)
         return
@@ -3736,16 +3702,22 @@ async def give_subscription_start(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
     await state.set_state(GiveSubscriptionState.waiting_user_id)
+    logging.info(f"[GIVE_SUB] State установлен: waiting_user_id")
     await callback.answer()
 
 @router.message(GiveSubscriptionState.waiting_user_id)
 async def give_subscription_user_id(message: Message, state: FSMContext):
+    logging.info(f"[GIVE_SUB] Получен USER ID: {message.text}")
+
     if not is_admin(message.from_user.id):
+        logging.info(f"[GIVE_SUB] Пользователь {message.from_user.id} не админ")
         return
 
     try:
         user_id = int(message.text.strip())
+        logging.info(f"[GIVE_SUB] Парсинг USER ID успешен: {user_id}")
     except ValueError:
+        logging.info(f"[GIVE_SUB] Ошибка парсинга USER ID: {message.text}")
         await message.answer("❌ Неверный формат! Введи числовой USER ID:")
         return
 
@@ -3860,6 +3832,43 @@ async def give_subscription_confirm(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await callback.answer()
+
+# ======================== ОБРАБОТЧИК КОДОВОГО СЛОВА (В КОНЦЕ!) ========================
+@router.message(F.text)
+async def secret_word_handler(message: Message):
+    """Проверка кодового слова для получения ссылки на канал"""
+    user_id = message.from_user.id
+    text = message.text.strip().lower()
+
+    secret_word = await get_secret_word()
+
+    if text == secret_word:
+        # Проверяем есть ли активная подписка
+        if await has_active_subscription(user_id):
+            # Генерируем одноразовую ссылку
+            invite_link = await generate_one_time_invite()
+
+            if invite_link:
+                await message.answer(
+                    f"🎉 <b>Поздравляем!</b>\n\n"
+                    f"Вот твоя персональная ссылка на канал:\n{invite_link}\n\n"
+                    f"⚠️ Ссылка одноразовая - используй её только для себя!\n\n"
+                    f"Добро пожаловать в КЛС!",
+                    parse_mode="HTML"
+                )
+            else:
+                # Если не удалось создать ссылку - используем запасную
+                await message.answer(
+                    f"🎉 <b>Поздравляем!</b>\n\n"
+                    f"Вот ссылка на канал:\n{FALLBACK_CHANNEL_LINK}\n\n"
+                    f"Добро пожаловать в КЛС!",
+                    parse_mode="HTML"
+                )
+        else:
+            await message.answer(
+                "❌ У тебя нет активной подписки.\n\n"
+                "Оплати подписку, чтобы получить доступ к каналу!"
+            )
 
 # ======================== ЗАПУСК ========================
 async def main():
