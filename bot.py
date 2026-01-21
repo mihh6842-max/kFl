@@ -39,7 +39,7 @@ def load_env():
 env = load_env()
 
 # ======================== КОНФИГ ========================
-BOT_TOKEN = env.get('BOT_TOKEN', "8442031806:AAFGnTvEEHLc92mPl5VJRJeOhpXbeNyEObI")
+BOT_TOKEN = env.get('BOT_TOKEN', "8576168614:AAEh_xsEmHSFVghHs3dx1caNPm7IxFk5EPA")
 YOOKASSA_SHOP_ID = env.get('YOOKASSA_SHOP_ID', "1024866")
 YOOKASSA_SECRET_KEY = env.get('YOOKASSA_SECRET_KEY', "live_62wmjnZ9ytjqZonaLiNw3gpsQjUKPbD-lBrTPK1Z38Y")
 CHANNEL_ID = -1002284489725  # Группа КЛС
