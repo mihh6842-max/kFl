@@ -208,6 +208,12 @@ async def get_user_profile(user_id: int) -> dict:
 
 async def add_user(user_id: int, username: str = None, referrer_id: int = None):
     async with aiosqlite.connect(DB_PATH) as db:
+        # Проверяем существует ли пользователь
+        async with db.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,)) as cursor:
+            existing = await cursor.fetchone()
+
+        is_new_user = not existing
+
         await db.execute('INSERT OR IGNORE INTO users (user_id, username, created_at) VALUES (?, ?, ?)',
                         (user_id, username, int(datetime.now().timestamp())))
 
@@ -223,6 +229,8 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
                 logging.error(f"Ошибка сохранения реферала: {e}")
 
         await db.commit()
+
+    return is_new_user
 
 async def auto_export_referrals():
     """Автоматический экспорт рефералов в Google Таблицы (при добавлении нового реферала)"""
@@ -1972,6 +1980,7 @@ def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="💎 Выдать подписку", callback_data="give_subscription")],
+        [InlineKeyboardButton(text="💰 Установить цену 1111₽", callback_data="set_special_price_bulk")],
         [InlineKeyboardButton(text="🚀 Создать рассылку", callback_data="create_broadcast")],
         [InlineKeyboardButton(text="🤖 AI Рассылка (без подписки)", callback_data="ai_broadcast")],
         [InlineKeyboardButton(text=broadcast_status, callback_data="toggle_auto_broadcast")],
@@ -2066,7 +2075,27 @@ async def cmd_start(message: Message):
             except (ValueError, IndexError):
                 referrer_id = None
 
-    await add_user(user_id, username, referrer_id)
+    is_new_user = await add_user(user_id, username, referrer_id)
+
+    # Уведомляем админов о новом пользователе
+    if is_new_user:
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"🆕 <b>НОВЫЙ ПОЛЬЗОВАТЕЛЬ</b>\n\n"
+                    f"👤 Имя: {first_name}\n"
+                    f"🆔 ID: <code>{user_id}</code>\n"
+                    f"📱 Username: @{username if username else 'нет'}\n"
+                    f"📅 Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="💬 Открыть чат", url=f"tg://user?id={user_id}")],
+                        [InlineKeyboardButton(text="📊 Профиль в боте", callback_data=f"user_profile:{user_id}")]
+                    ])
+                )
+            except Exception as e:
+                logging.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
 
     welcome_text = """Добро пожаловать в пространство, где даже любители растут как спортсмены.
 
@@ -2576,6 +2605,32 @@ async def check_payment(payment_id: str, user_id: int, max_checks: int = 60):
                     await db.execute('UPDATE payments SET status = ? WHERE payment_id = ?', ('succeeded', payment_id))
                     await db.commit()
 
+                # Уведомляем админов о новом подписчике
+                async with aiosqlite.connect(DB_PATH) as db:
+                    async with db.execute('SELECT username, name FROM users WHERE user_id = ?', (user_id,)) as cursor:
+                        user_data = await cursor.fetchone()
+
+                if user_data:
+                    username, name = user_data
+                    for admin_id in ADMIN_IDS:
+                        try:
+                            await bot.send_message(
+                                admin_id,
+                                f"💰 <b>НОВАЯ ПОКУПКА!</b>\n\n"
+                                f"👤 Пользователь: {name or 'Нет имени'}\n"
+                                f"📱 Username: @{username if username else 'нет'}\n"
+                                f"🆔 ID: <code>{user_id}</code>\n"
+                                f"💵 Сумма: <b>{paid_amount} ₽</b>\n"
+                                f"📅 Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                                parse_mode="HTML",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                    [InlineKeyboardButton(text="💬 Открыть чат", url=f"tg://user?id={user_id}")],
+                                    [InlineKeyboardButton(text="📊 Профиль в боте", callback_data=f"user_profile:{user_id}")]
+                                ])
+                            )
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
+
                 # Отправляем видео или текст после оплаты
                 paid_video = await get_paid_video()
                 secret_word = await get_secret_word()
@@ -2876,40 +2931,85 @@ async def cmd_setspecialprice(message: Message):
 async def admin_stats(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
-    
+
+    now = int(datetime.now().timestamp())
+    today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    week_start = int((datetime.now() - timedelta(days=7)).timestamp())
+
     async with aiosqlite.connect(DB_PATH) as db:
+        # Общая статистика
         total = (await (await db.execute('SELECT COUNT(*) FROM users')).fetchone())[0]
-        active = (await (await db.execute('SELECT COUNT(*) FROM users WHERE subscription_until > ?', 
-                                           (int(datetime.now().timestamp()),))).fetchone())[0]
+        active = (await (await db.execute('SELECT COUNT(*) FROM users WHERE subscription_until > ?', (now,))).fetchone())[0]
         revenue = (await (await db.execute('SELECT SUM(amount) FROM payments WHERE status = "succeeded"')).fetchone())[0] or 0
-    
-    text = f"📊 <b>Статистика бота</b>\n\n"
+
+        # Новые пользователи
+        new_today = (await (await db.execute('SELECT COUNT(*) FROM users WHERE created_at >= ?', (today_start,))).fetchone())[0]
+        new_week = (await (await db.execute('SELECT COUNT(*) FROM users WHERE created_at >= ?', (week_start,))).fetchone())[0]
+
+        # Новые подписчики (платежи)
+        paid_today = (await (await db.execute(
+            'SELECT COUNT(*), SUM(amount) FROM payments WHERE status = "succeeded" AND created_at >= ?',
+            (today_start,)
+        )).fetchone())
+        paid_week = (await (await db.execute(
+            'SELECT COUNT(*), SUM(amount) FROM payments WHERE status = "succeeded" AND created_at >= ?',
+            (week_start,)
+        )).fetchone())
+
+        paid_today_count, paid_today_sum = paid_today[0], paid_today[1] or 0
+        paid_week_count, paid_week_sum = paid_week[0], paid_week[1] or 0
+
+    text = f"📊 <b>СТАТИСТИКА БОТА</b>\n\n"
     text += f"👥 Всего пользователей: <b>{total}</b>\n"
     text += f"✅ Активных подписок: <b>{active}</b>\n"
-    text += f"💰 Общая выручка: <b>{revenue} ₽</b>"
-    
-    await callback.message.answer(text, parse_mode="HTML")
+    text += f"💰 Общая выручка: <b>{revenue} ₽</b>\n\n"
+
+    text += f"📈 <b>НОВЫЕ ПОЛЬЗОВАТЕЛИ:</b>\n"
+    text += f"  ├ За сегодня: <b>{new_today}</b>\n"
+    text += f"  └ За неделю: <b>{new_week}</b>\n\n"
+
+    text += f"💎 <b>НОВЫЕ ПОДПИСЧИКИ:</b>\n"
+    text += f"  ├ За сегодня: <b>{paid_today_count}</b> ({paid_today_sum} ₽)\n"
+    text += f"  └ За неделю: <b>{paid_week_count}</b> ({paid_week_sum} ₽)"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Последние пользователи", callback_data="users")],
+        [InlineKeyboardButton(text="💰 Последние платежи", callback_data="recent_payments")],
+        [InlineKeyboardButton(text="🔙 Админ-панель", callback_data="back_to_admin")]
+    ])
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data == "users")
 async def admin_users(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            'SELECT user_id, username, phone, subscription_until FROM users ORDER BY created_at DESC LIMIT 20'
+            'SELECT user_id, username, name, subscription_until FROM users ORDER BY created_at DESC LIMIT 15'
         ) as cursor:
             users = await cursor.fetchall()
-    
+
     text = "👥 <b>Последние пользователи:</b>\n\n"
-    for user_id, username, phone, sub_until in users:
+
+    buttons = []
+    for i, (user_id, username, name, sub_until) in enumerate(users, 1):
         status = "✅" if sub_until and sub_until > int(datetime.now().timestamp()) else "❌"
-        username_str = f"@{username}" if username else f"ID: {user_id}"
-        phone_str = f"📱 {phone}" if phone else "Нет номера"
-        text += f"{status} {username_str}\n{phone_str}\n\n"
-    
-    await callback.message.answer(text, parse_mode="HTML")
+        username_str = f"@{username}" if username else f"{name or 'Нет имени'}"
+        text += f"{i}. {status} {username_str}\n"
+
+        # Кнопка для каждого пользователя
+        buttons.append([InlineKeyboardButton(
+            text=f"{i}. {username_str[:20]} - Профиль",
+            callback_data=f"user_profile:{user_id}"
+        )])
+
+    buttons.append([InlineKeyboardButton(text="🔙 К статистике", callback_data="stats")])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data == "create_broadcast")
@@ -3544,6 +3644,9 @@ class GiveSubscriptionState(StatesGroup):
     waiting_days = State()
     waiting_confirmation = State()
 
+class SetSpecialPriceState(StatesGroup):
+    waiting_user_ids = State()
+
 @router.callback_query(F.data == "subscription_settings")
 async def subscription_settings_menu(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -3831,6 +3934,240 @@ async def give_subscription_confirm(callback: CallbackQuery, state: FSMContext):
     )
 
     await state.clear()
+    await callback.answer()
+
+# ======================== МАССОВАЯ УСТАНОВКА ЦЕНЫ 1111₽ ========================
+@router.callback_query(F.data == "set_special_price_bulk")
+async def set_special_price_bulk_start(callback: CallbackQuery, state: FSMContext):
+    logging.info(f"[SET_PRICE] Кнопка нажата админом {callback.from_user.id}")
+
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "💰 <b>Массовая установка цены 1111₽</b>\n\n"
+        "Введи список USER ID (по одному на строку или через запятую):\n\n"
+        "<i>Пример:</i>\n"
+        "<code>123456789\n"
+        "987654321\n"
+        "555666777</code>\n\n"
+        "Или: <code>123456789, 987654321, 555666777</code>\n\n"
+        "⚠️ Пользователи будут созданы в БД если их нет",
+        parse_mode="HTML"
+    )
+    await state.set_state(SetSpecialPriceState.waiting_user_ids)
+    logging.info(f"[SET_PRICE] State установлен: waiting_user_ids")
+    await callback.answer()
+
+@router.message(SetSpecialPriceState.waiting_user_ids)
+async def set_special_price_bulk_process(message: Message, state: FSMContext):
+    logging.info(f"[SET_PRICE] Получен список: {message.text[:100]}")
+
+    if not is_admin(message.from_user.id):
+        return
+
+    # Парсим USER ID
+    text = message.text.strip()
+    user_ids = []
+
+    # Разбиваем по запятым и/или новым строкам
+    for line in text.replace(',', '\n').split('\n'):
+        line = line.strip()
+        if line.isdigit():
+            user_ids.append(int(line))
+
+    if not user_ids:
+        await message.answer("❌ Не найдено ни одного валидного USER ID!")
+        return
+
+    logging.info(f"[SET_PRICE] Обработка {len(user_ids)} пользователей")
+
+    # Устанавливаем цену
+    now = int(datetime.now().timestamp())
+    grace_7_days = int((datetime.now() + timedelta(days=7)).timestamp())
+
+    created = 0
+    updated = 0
+    errors = []
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        for user_id in user_ids:
+            try:
+                # Проверяем есть ли пользователь
+                async with db.execute('SELECT subscription_until FROM users WHERE user_id = ?', (user_id,)) as cursor:
+                    row = await cursor.fetchone()
+
+                if row:
+                    # Пользователь есть - обновляем
+                    sub_until = row[0] or 0
+                    if sub_until > now:
+                        grace = sub_until + 7 * 24 * 3600
+                    else:
+                        grace = grace_7_days
+
+                    await db.execute(
+                        'UPDATE users SET special_price = ?, grace_period_until = ? WHERE user_id = ?',
+                        (1111, grace, user_id)
+                    )
+                    updated += 1
+                    logging.info(f"[SET_PRICE] Updated user {user_id}")
+                else:
+                    # Пользователя нет - создаём
+                    await db.execute(
+                        'INSERT INTO users (user_id, special_price, grace_period_until, created_at) VALUES (?, ?, ?, ?)',
+                        (user_id, 1111, grace_7_days, now)
+                    )
+                    created += 1
+                    logging.info(f"[SET_PRICE] Created user {user_id}")
+
+            except Exception as e:
+                logging.error(f"[SET_PRICE] Ошибка для {user_id}: {e}")
+                errors.append(f"{user_id}: {str(e)[:50]}")
+
+        await db.commit()
+
+    # Результат
+    result_text = (
+        f"💰 <b>Результат установки цены 1111₽</b>\n\n"
+        f"✅ Обновлено: <b>{updated}</b>\n"
+        f"🆕 Создано: <b>{created}</b>\n"
+        f"❌ Ошибок: <b>{len(errors)}</b>\n\n"
+        f"📋 Всего обработано: <b>{len(user_ids)}</b> USER ID"
+    )
+
+    if errors:
+        result_text += f"\n\n⚠️ <b>Ошибки:</b>\n" + "\n".join(errors[:5])
+        if len(errors) > 5:
+            result_text += f"\n<i>...и ещё {len(errors) - 5}</i>"
+
+    await message.answer(
+        result_text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Админ-панель", callback_data="back_to_admin")]
+        ])
+    )
+
+    await state.clear()
+    logging.info(f"[SET_PRICE] Завершено: {updated} updated, {created} created, {len(errors)} errors")
+
+# ======================== ПРОСМОТР ПРОФИЛЯ ПОЛЬЗОВАТЕЛЯ ========================
+@router.callback_query(F.data.startswith("user_profile:"))
+async def view_user_profile(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+
+    user_id = int(callback.data.split(":")[1])
+    logging.info(f"[PROFILE] Просмотр профиля {user_id}")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            '''SELECT user_id, username, name, phone, subscription_until, special_price,
+                      created_at, age, gender, goal, level FROM users WHERE user_id = ?''',
+            (user_id,)
+        ) as cursor:
+            user = await cursor.fetchone()
+
+        # Платежи пользователя
+        async with db.execute(
+            'SELECT amount, created_at, status FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT 5',
+            (user_id,)
+        ) as cursor:
+            payments = await cursor.fetchall()
+
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+
+    user_id, username, name, phone, sub_until, special_price, created_at, age, gender, goal, level = user
+
+    # Формируем профиль
+    now = int(datetime.now().timestamp())
+    sub_active = sub_until and sub_until > now
+
+    text = f"👤 <b>ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ</b>\n\n"
+    text += f"🆔 ID: <code>{user_id}</code>\n"
+    text += f"👤 Имя: {name or 'Не указано'}\n"
+    text += f"📱 Username: @{username}" if username else "📱 Username: нет\n"
+    text += f"\n📞 Телефон: {phone or 'Не указан'}\n"
+    text += f"📅 Регистрация: {datetime.fromtimestamp(created_at).strftime('%d.%m.%Y')}\n\n"
+
+    text += f"💎 <b>ПОДПИСКА:</b>\n"
+    if sub_active:
+        text += f"  ✅ Активна до: {datetime.fromtimestamp(sub_until).strftime('%d.%m.%Y %H:%M')}\n"
+    else:
+        text += f"  ❌ Не активна\n"
+
+    if special_price:
+        text += f"  💰 Спец.цена: <b>{special_price} ₽</b>\n"
+
+    # Данные профиля
+    if age or gender or goal:
+        text += f"\n📋 <b>ДАННЫЕ:</b>\n"
+        if age:
+            text += f"  ├ Возраст: {age}\n"
+        if gender:
+            text += f"  ├ Пол: {gender}\n"
+        if goal:
+            text += f"  ├ Цель: {goal}\n"
+        if level:
+            text += f"  └ Уровень: {level}\n"
+
+    # Платежи
+    if payments:
+        text += f"\n💳 <b>ПЛАТЕЖИ ({len(payments)}):</b>\n"
+        for amount, pay_time, status in payments[:3]:
+            status_emoji = "✅" if status == "succeeded" else "❌"
+            date_str = datetime.fromtimestamp(pay_time).strftime('%d.%m %H:%M')
+            text += f"  {status_emoji} {amount} ₽ - {date_str}\n"
+
+    # Кнопки
+    buttons = [
+        [InlineKeyboardButton(text="💎 Выдать подписку", callback_data=f"give_sub_to:{user_id}")],
+        [InlineKeyboardButton(text="💰 Установить цену 1111₽", callback_data=f"set_price_to:{user_id}")],
+        [InlineKeyboardButton(text="💬 Открыть в Telegram", url=f"tg://user?id={user_id}")],
+        [InlineKeyboardButton(text="🔙 К списку", callback_data="users")]
+    ]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+# ======================== ПОСЛЕДНИЕ ПЛАТЕЖИ ========================
+@router.callback_query(F.data == "recent_payments")
+async def recent_payments(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            '''SELECT p.user_id, p.amount, p.created_at, p.status, u.username, u.name
+               FROM payments p
+               LEFT JOIN users u ON p.user_id = u.user_id
+               WHERE p.status = "succeeded"
+               ORDER BY p.created_at DESC LIMIT 20''',
+        ) as cursor:
+            payments = await cursor.fetchall()
+
+    text = "💰 <b>Последние платежи:</b>\n\n"
+
+    buttons = []
+    for i, (user_id, amount, pay_time, status, username, name) in enumerate(payments, 1):
+        date_str = datetime.fromtimestamp(pay_time).strftime('%d.%m.%Y %H:%M')
+        user_str = f"@{username}" if username else (name or f"ID{user_id}")
+        text += f"{i}. <b>{amount} ₽</b> - {user_str}\n   {date_str}\n"
+
+        buttons.append([InlineKeyboardButton(
+            text=f"{i}. {user_str[:15]} - {amount}₽",
+            callback_data=f"user_profile:{user_id}"
+        )])
+
+    buttons.append([InlineKeyboardButton(text="🔙 К статистике", callback_data="stats")])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 # ======================== ОБРАБОТЧИК КОДОВОГО СЛОВА (В КОНЦЕ!) ========================
