@@ -44,7 +44,7 @@ YOOKASSA_SHOP_ID = env.get('YOOKASSA_SHOP_ID', "1024866")
 YOOKASSA_SECRET_KEY = env.get('YOOKASSA_SECRET_KEY', "live_62wmjnZ9ytjqZonaLiNw3gpsQjUKPbD-lBrTPK1Z38Y")
 CHANNEL_ID = -1002284489725  # Группа КЛС
 FALLBACK_CHANNEL_LINK = "https://t.me/+iD8NwG9tfakwNzJi"  # Запасная ссылка
-ADMIN_IDS = [7338817463, 1478525032, 853335233, 7634974626]
+ADMIN_IDS = [7338817463, 1478525032]
 PRICE_1_MONTH = 2222  # Стандартная цена для новых пользователей
 AUTO_BROADCAST_ENABLED = True  # Автоматическая рассылка вкл/выкл
 DB_PATH = 'data/bot.db'  # Путь к базе данных
@@ -181,6 +181,36 @@ async def init_db():
             FOREIGN KEY (referrer_id) REFERENCES users(user_id),
             FOREIGN KEY (referred_id) REFERENCES users(user_id)
         )''')
+
+        await db.execute('''CREATE TABLE IF NOT EXISTS referral_balance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE,
+            balance REAL DEFAULT 0,
+            total_earned REAL DEFAULT 0,
+            total_withdrawn REAL DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+
+        await db.execute('''CREATE TABLE IF NOT EXISTS referral_earnings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER,
+            referred_id INTEGER,
+            amount REAL,
+            created_at INTEGER,
+            payment_id TEXT,
+            FOREIGN KEY (referrer_id) REFERENCES users(user_id),
+            FOREIGN KEY (referred_id) REFERENCES users(user_id)
+        )''')
+
+        await db.execute('''CREATE TABLE IF NOT EXISTS withdrawals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount REAL,
+            status TEXT,
+            created_at INTEGER,
+            processed_at INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
         await db.commit()
 
 # ======================== ФУНКЦИИ ========================
@@ -304,6 +334,53 @@ def get_next_milestone(count: int) -> dict:
         if count < m:
             return {'target': m, 'remaining': m - count}
     return {'target': 100, 'remaining': 100 - count}
+
+async def add_referral_earnings(referrer_id: int, referred_id: int, amount: float, payment_id: str):
+    """Начисляет заработок рефереру"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            'INSERT INTO referral_earnings (referrer_id, referred_id, amount, created_at, payment_id) VALUES (?, ?, ?, ?, ?)',
+            (referrer_id, referred_id, amount, int(datetime.now().timestamp()), payment_id)
+        )
+        await db.execute(
+            'INSERT OR IGNORE INTO referral_balance (user_id, balance, total_earned) VALUES (?, 0, 0)',
+            (referrer_id,)
+        )
+        await db.execute(
+            'UPDATE referral_balance SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?',
+            (amount, amount, referrer_id)
+        )
+        await db.commit()
+
+async def get_referral_balance(user_id: int) -> dict:
+    """Получить баланс реферала"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            'INSERT OR IGNORE INTO referral_balance (user_id, balance, total_earned, total_withdrawn) VALUES (?, 0, 0, 0)',
+            (user_id,)
+        )
+        await db.commit()
+        async with db.execute(
+            'SELECT balance, total_earned, total_withdrawn FROM referral_balance WHERE user_id = ?',
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return {'balance': row[0], 'total_earned': row[1], 'total_withdrawn': row[2]}
+            return {'balance': 0, 'total_earned': 0, 'total_withdrawn': 0}
+
+async def create_withdrawal(user_id: int, amount: float):
+    """Создать заявку на вывод"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            'INSERT INTO withdrawals (user_id, amount, status, created_at) VALUES (?, ?, ?, ?)',
+            (user_id, amount, 'pending', int(datetime.now().timestamp()))
+        )
+        await db.execute(
+            'UPDATE referral_balance SET balance = balance - ?, total_withdrawn = total_withdrawn + ? WHERE user_id = ?',
+            (amount, amount, user_id)
+        )
+        await db.commit()
 
 def clean_markdown(text: str) -> str:
     """Очищает и конвертирует markdown символы для Telegram"""
@@ -1988,7 +2065,8 @@ def admin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📚 Контент", callback_data="view_content"),
          InlineKeyboardButton(text="🎬 Медиа", callback_data="change_welcome_media")],
         [InlineKeyboardButton(text="📊 Google Sheets", callback_data="export_menu")],
-        [InlineKeyboardButton(text="⚙️ Настройки подписки", callback_data="subscription_settings")]
+        [InlineKeyboardButton(text="⚙️ Настройки подписки", callback_data="subscription_settings")],
+        [InlineKeyboardButton(text="👑 Добавить админа", callback_data="add_admin")]
     ])
 
 def test_start_kb() -> InlineKeyboardMarkup:
@@ -2603,6 +2681,35 @@ async def check_payment(payment_id: str, user_id: int, max_checks: int = 60):
                     await db.execute('UPDATE payments SET status = ? WHERE payment_id = ?', ('succeeded', payment_id))
                     await db.commit()
 
+                referrer_id = None
+                async with aiosqlite.connect(DB_PATH) as db:
+                    async with db.execute('SELECT referrer_id FROM referrals WHERE referred_id = ?', (user_id,)) as cursor:
+                        ref_row = await cursor.fetchone()
+                        if ref_row:
+                            referrer_id = ref_row[0]
+
+                if referrer_id:
+                    commission = paid_amount * 0.1
+                    await add_referral_earnings(referrer_id, user_id, commission, payment_id)
+
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        async with db.execute('SELECT username, name FROM users WHERE user_id = ?', (referrer_id,)) as cursor:
+                            referrer_data = await cursor.fetchone()
+
+                    if referrer_data:
+                        referrer_username, referrer_name = referrer_data
+                        try:
+                            await bot.send_message(
+                                referrer_id,
+                                f"💰 <b>Начисление за реферала!</b>\n\n"
+                                f"Твой реферал оформил подписку!\n"
+                                f"💵 Начислено: <b>{commission:.2f} ₽</b>\n\n"
+                                f"Используй /referrals чтобы посмотреть баланс",
+                                parse_mode="HTML"
+                            )
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки уведомления рефереру {referrer_id}: {e}")
+
                 # Уведомляем админов о новом подписчике
                 async with aiosqlite.connect(DB_PATH) as db:
                     async with db.execute('SELECT username, name FROM users WHERE user_id = ?', (user_id,)) as cursor:
@@ -2610,16 +2717,32 @@ async def check_payment(payment_id: str, user_id: int, max_checks: int = 60):
 
                 if user_data:
                     username, name = user_data
+                    admin_msg = f"💰 <b>НОВАЯ ПОКУПКА!</b>\n\n"
+                    admin_msg += f"👤 Пользователь: {name or 'Нет имени'}\n"
+                    admin_msg += f"📱 Username: @{username if username else 'нет'}\n"
+                    admin_msg += f"🆔 ID: <code>{user_id}</code>\n"
+                    admin_msg += f"💵 Сумма: <b>{paid_amount} ₽</b>\n"
+
+                    if referrer_id:
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            async with db.execute('SELECT username, name FROM users WHERE user_id = ?', (referrer_id,)) as cursor:
+                                ref_info = await cursor.fetchone()
+                        if ref_info:
+                            ref_username, ref_name = ref_info
+                            commission = paid_amount * 0.1
+                            admin_msg += f"\n🎁 <b>ПОКУПКА РЕФЕРАЛА!</b>\n"
+                            admin_msg += f"├ Реферер: {ref_name or 'Нет имени'}\n"
+                            admin_msg += f"├ Username: @{ref_username if ref_username else 'нет'}\n"
+                            admin_msg += f"├ ID: <code>{referrer_id}</code>\n"
+                            admin_msg += f"└ Начислено: <b>{commission:.2f} ₽</b>\n"
+
+                    admin_msg += f"\n📅 Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+
                     for admin_id in ADMIN_IDS:
                         try:
                             await bot.send_message(
                                 admin_id,
-                                f"💰 <b>НОВАЯ ПОКУПКА!</b>\n\n"
-                                f"👤 Пользователь: {name or 'Нет имени'}\n"
-                                f"📱 Username: @{username if username else 'нет'}\n"
-                                f"🆔 ID: <code>{user_id}</code>\n"
-                                f"💵 Сумма: <b>{paid_amount} ₽</b>\n"
-                                f"📅 Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                                admin_msg,
                                 parse_mode="HTML",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                     [InlineKeyboardButton(text="💬 Открыть чат", url=f"tg://user?id={user_id}")],
@@ -2676,42 +2799,43 @@ async def support_button(message: Message):
     await message.answer("💬 <b>Поддержка:</b>\n\nСвяжитесь с нами: @pavlychevayana99", parse_mode="HTML")
 
 @router.message(F.text == "👥 Пригласить друга")
+@router.message(Command("referrals"))
 async def referral_button(message: Message):
     user_id = message.from_user.id
     username = message.from_user.username or "пользователь"
 
-    # Получаем данные о рефералах и наградах
     rewards = await get_referral_rewards(user_id)
     ref_link = await get_referral_link(user_id)
+    balance_data = await get_referral_balance(user_id)
 
-    # Формируем прогресс-бар
     next_target = rewards['next_milestone']['target']
     remaining = rewards['next_milestone']['remaining']
     progress = rewards['count']
     progress_bar = '▰' * min(progress, 10) + '▱' * max(0, 10 - progress)
 
-    # Улучшенное сообщение с системой уровней
     ref_message = (
         f"🎁 <b>РЕФЕРАЛЬНАЯ ПРОГРАММА</b>\n\n"
         f"🏅 <b>Твой уровень:</b> {rewards['level']}\n"
         f"👥 <b>Приглашено:</b> {rewards['count']} друзей\n\n"
+        f"💰 <b>БАЛАНС</b>\n"
+        f"├ Доступно: <b>{balance_data['balance']:.2f} ₽</b>\n"
+        f"├ Всего заработано: {balance_data['total_earned']:.2f} ₽\n"
+        f"└ Выведено: {balance_data['total_withdrawn']:.2f} ₽\n\n"
         f"📊 <b>Прогресс до {next_target} друзей:</b>\n"
         f"{progress_bar} ({remaining} осталось)\n\n"
         f"🔗 <b>Твоя персональная ссылка:</b>\n"
         f"<code>{ref_link}</code>\n\n"
-        f"💎 <b>Система уровней:</b>\n"
-        f"• 5 друзей = ⭐ Активный партнер\n"
-        f"• 10 друзей = 🥉 Бронзовый партнер\n"
-        f"• 20 друзей = 🥈 Серебряный партнер\n"
-        f"• 50 друзей = 🏆 Золотой партнер\n\n"
-        f"💡 <i>Приглашай друзей и повышай свой уровень!</i>"
+        f"💎 <b>За каждого реферала с подпиской:</b>\n"
+        f"├ Получаешь 10% от стоимости\n"
+        f"└ Вывод от 100 ₽\n\n"
+        f"💡 <i>Приглашай друзей и зарабатывай!</i>"
     )
 
-    # Кнопки для шаринга и статистики
     share_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📤 Поделиться ссылкой",
                             url=f"https://t.me/share/url?url={ref_link}&text=Присоединяйся к Кафедре любительского спорта! 🎿")],
-        [InlineKeyboardButton(text="📊 Детальная статистика", callback_data="ref_stats")]
+        [InlineKeyboardButton(text="💸 Вывод средств", callback_data="ref_withdraw")],
+        [InlineKeyboardButton(text="📋 Условия программы", callback_data="ref_terms")]
     ])
 
     await message.answer(ref_message, parse_mode="HTML", reply_markup=share_kb)
@@ -3630,6 +3754,124 @@ async def close_stats(callback: CallbackQuery):
     await callback.message.delete()
     await callback.answer()
 
+class WithdrawalState(StatesGroup):
+    waiting_amount = State()
+
+@router.callback_query(F.data == "ref_withdraw")
+async def referral_withdraw(callback: CallbackQuery, state: FSMContext):
+    """Вывод средств"""
+    user_id = callback.from_user.id
+    balance_data = await get_referral_balance(user_id)
+
+    if balance_data['balance'] < 100:
+        await callback.answer(
+            f"❌ Минимальная сумма вывода 100 ₽\nТвой баланс: {balance_data['balance']:.2f} ₽",
+            show_alert=True
+        )
+        return
+
+    text = (
+        f"💸 <b>ВЫВОД СРЕДСТВ</b>\n\n"
+        f"💰 Доступно для вывода: <b>{balance_data['balance']:.2f} ₽</b>\n\n"
+        f"⚠️ <b>ВАЖНО!</b>\n"
+        f"Для вывода средств необходимо:\n"
+        f"├ Быть ИП или самозанятым\n"
+        f"└ Написать в поддержку @pavlychevayana99\n\n"
+        f"💡 Укажи сумму для вывода (от 100 ₽):"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="close_withdraw")]
+    ])
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await state.set_state(WithdrawalState.waiting_amount)
+    await callback.answer()
+
+@router.message(WithdrawalState.waiting_amount)
+async def process_withdrawal_amount(message: Message, state: FSMContext):
+    """Обработка суммы вывода"""
+    user_id = message.from_user.id
+
+    try:
+        amount = float(message.text.replace(',', '.'))
+    except:
+        await message.answer("❌ Неверный формат суммы. Укажи число (например: 100 или 150.50)")
+        return
+
+    if amount < 100:
+        await message.answer("❌ Минимальная сумма вывода 100 ₽")
+        return
+
+    balance_data = await get_referral_balance(user_id)
+    if amount > balance_data['balance']:
+        await message.answer(f"❌ Недостаточно средств.\nТвой баланс: {balance_data['balance']:.2f} ₽")
+        return
+
+    await create_withdrawal(user_id, amount)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT username, name FROM users WHERE user_id = ?', (user_id,)) as cursor:
+            user_data = await cursor.fetchone()
+
+    username, name = user_data if user_data else (None, None)
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"💸 <b>ЗАЯВКА НА ВЫВОД!</b>\n\n"
+                f"👤 Пользователь: {name or 'Нет имени'}\n"
+                f"📱 Username: @{username if username else 'нет'}\n"
+                f"🆔 ID: <code>{user_id}</code>\n"
+                f"💵 Сумма: <b>{amount:.2f} ₽</b>\n"
+                f"📅 Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                f"⚠️ Пользователь должен быть ИП/СЗ",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💬 Открыть чат", url=f"tg://user?id={user_id}")]
+                ])
+            )
+        except Exception as e:
+            logging.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
+
+    await message.answer(
+        f"✅ <b>Заявка на вывод создана!</b>\n\n"
+        f"💵 Сумма: {amount:.2f} ₽\n\n"
+        f"📱 Для завершения вывода напиши в поддержку:\n@pavlychevayana99\n\n"
+        f"⚠️ Напомни, что ты должен быть ИП или самозанятым",
+        parse_mode="HTML"
+    )
+
+    await state.clear()
+
+@router.callback_query(F.data == "close_withdraw")
+async def close_withdraw(callback: CallbackQuery, state: FSMContext):
+    """Закрыть окно вывода"""
+    await state.clear()
+    await callback.message.delete()
+    await callback.answer()
+
+@router.callback_query(F.data == "ref_terms")
+async def referral_terms(callback: CallbackQuery):
+    """Показать условия реферальной программы"""
+    pdf_path = r"C:\Users\admin\Desktop\KLS_bot\ПОЛОЖЕНИЕ_О_РЕФЕРАЛЬНОЙ_ПРОГРАММЕ.pdf"
+
+    try:
+        with open(pdf_path, 'rb') as pdf_file:
+            await bot.send_document(
+                callback.from_user.id,
+                FSInputFile(pdf_path),
+                caption="📋 <b>Условия реферальной программы</b>",
+                parse_mode="HTML"
+            )
+        await callback.answer("✅ Документ отправлен")
+    except FileNotFoundError:
+        await callback.answer("❌ Файл с условиями не найден", show_alert=True)
+    except Exception as e:
+        logging.error(f"Ошибка отправки PDF: {e}")
+        await callback.answer("❌ Ошибка отправки документа", show_alert=True)
+
 # ======================== НАСТРОЙКИ ПОДПИСКИ ========================
 class SubscriptionSettings(StatesGroup):
     waiting_price = State()
@@ -3644,6 +3886,9 @@ class GiveSubscriptionState(StatesGroup):
 
 class SetSpecialPriceState(StatesGroup):
     waiting_user_ids = State()
+
+class AddAdminState(StatesGroup):
+    waiting_admin_id = State()
 
 @router.callback_query(F.data == "subscription_settings")
 async def subscription_settings_menu(callback: CallbackQuery):

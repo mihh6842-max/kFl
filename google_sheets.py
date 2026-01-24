@@ -345,22 +345,108 @@ async def export_payments_to_sheet(spreadsheet_url: str = None, spreadsheet_id: 
         return False, f"Ошибка: {str(e)}"
 
 
+async def export_withdrawals_to_sheet(spreadsheet_url: str = None, spreadsheet_id: str = None):
+    """
+    Экспортирует данные о выводах в Google Таблицу
+    """
+    try:
+        client = get_google_sheets_client()
+        if not client:
+            return False, "Ошибка подключения к Google Sheets"
+
+        if spreadsheet_url:
+            spreadsheet = client.open_by_url(spreadsheet_url)
+        elif spreadsheet_id:
+            spreadsheet = client.open_by_key(spreadsheet_id)
+        else:
+            return False, "Не указан URL или ID таблицы"
+
+        try:
+            sheet = spreadsheet.worksheet("Выводы")
+        except:
+            sheet = spreadsheet.add_worksheet(title="Выводы", rows=1000, cols=10)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('''
+                SELECT
+                    w.id,
+                    w.user_id,
+                    u.username,
+                    u.name,
+                    w.amount,
+                    w.status,
+                    w.created_at,
+                    w.processed_at
+                FROM withdrawals w
+                LEFT JOIN users u ON w.user_id = u.user_id
+                ORDER BY w.created_at DESC
+            ''') as cursor:
+                withdrawals = await cursor.fetchall()
+
+        headers = [
+            'ID',
+            'User ID',
+            'Username',
+            'Имя',
+            'Сумма (₽)',
+            'Статус',
+            'Дата создания',
+            'Дата обработки'
+        ]
+
+        data = [headers]
+
+        for w in withdrawals:
+            w_id, user_id, username, name, amount, status, created, processed = w
+
+            created_date = datetime.fromtimestamp(created).strftime('%d.%m.%Y %H:%M') if created else ''
+            processed_date = datetime.fromtimestamp(processed).strftime('%d.%m.%Y %H:%M') if processed else ''
+
+            status_emoji = '✅' if status == 'completed' else '⏳' if status == 'pending' else '❌'
+
+            row = [
+                str(w_id),
+                str(user_id),
+                f"@{username}" if username else 'Нет',
+                name or '',
+                str(amount),
+                f"{status_emoji} {status}",
+                created_date,
+                processed_date
+            ]
+            data.append(row)
+
+        sheet.clear()
+        sheet.update('A1', data, value_input_option='USER_ENTERED')
+
+        sheet.format('A1:H1', {
+            'textFormat': {'bold': True},
+            'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+        })
+
+        return True, f"Экспортировано {len(withdrawals)} выводов"
+
+    except Exception as e:
+        logging.error(f"Ошибка экспорта выводов в Google Sheets: {e}")
+        return False, f"Ошибка: {str(e)}"
+
+
 async def export_all_data(spreadsheet_url: str = None, spreadsheet_id: str = None):
     """
     Экспортирует все данные в одну таблицу на разные листы
     """
     results = []
 
-    # Экспорт пользователей
     success, msg = await export_users_to_sheet(spreadsheet_url, spreadsheet_id)
     results.append(f"Пользователи: {msg}")
 
-    # Экспорт рефералов
     success, msg = await export_referrals_to_sheet(spreadsheet_url, spreadsheet_id)
     results.append(f"Рефералы: {msg}")
 
-    # Экспорт платежей
     success, msg = await export_payments_to_sheet(spreadsheet_url, spreadsheet_id)
     results.append(f"Платежи: {msg}")
+
+    success, msg = await export_withdrawals_to_sheet(spreadsheet_url, spreadsheet_id)
+    results.append(f"Выводы: {msg}")
 
     return True, "\n".join(results)
