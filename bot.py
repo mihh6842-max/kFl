@@ -3855,7 +3855,7 @@ async def close_withdraw(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "ref_terms")
 async def referral_terms(callback: CallbackQuery):
     """Показать условия реферальной программы"""
-    pdf_path = r"C:\Users\admin\Desktop\KLS_bot\ПОЛОЖЕНИЕ_О_РЕФЕРАЛЬНОЙ_ПРОГРАММЕ.pdf"
+    pdf_path = r"C:\Users\admin\Desktop\KLS_bot\data\refer_programm.pdf"
 
     try:
         with open(pdf_path, 'rb') as pdf_file:
