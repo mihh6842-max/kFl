@@ -3855,16 +3855,15 @@ async def close_withdraw(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "ref_terms")
 async def referral_terms(callback: CallbackQuery):
     """Показать условия реферальной программы"""
-    pdf_path = r"C:\Users\admin\Desktop\KLS_bot\data\refer_programm.pdf"
+    pdf_path = "data/refer_programm.pdf"
 
     try:
-        with open(pdf_path, 'rb') as pdf_file:
-            await bot.send_document(
-                callback.from_user.id,
-                FSInputFile(pdf_path),
-                caption="📋 <b>Условия реферальной программы</b>",
-                parse_mode="HTML"
-            )
+        await bot.send_document(
+            callback.from_user.id,
+            FSInputFile(pdf_path),
+            caption="📋 <b>Условия реферальной программы</b>",
+            parse_mode="HTML"
+        )
         await callback.answer("✅ Документ отправлен")
     except FileNotFoundError:
         await callback.answer("❌ Файл с условиями не найден", show_alert=True)
