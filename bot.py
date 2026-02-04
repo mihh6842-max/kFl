@@ -2507,11 +2507,65 @@ async def more_about_kls_handler(callback: CallbackQuery):
 # Обработчик "Оформить подписку"
 @router.callback_query(F.data == "subscribe_now")
 async def subscribe_now_handler(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer(
-        "📱 Для отслеживания подписки отправь свой номер телефона:",
-        reply_markup=phone_kb()
-    )
-    await state.set_state(PhoneState.waiting_phone)
+    user_id = callback.from_user.id
+    keyboard = main_kb(is_admin(user_id))
+    price = await get_user_price(user_id)
+
+    try:
+        logging.info(f"Создаю платеж для {user_id}...")
+
+        def create_payment_sync():
+            return Payment.create({
+                "amount": {"value": f"{price}.00", "currency": "RUB"},
+                "confirmation": {"type": "redirect", "return_url": f"https://t.me/djfkjf_bot"},
+                "capture": True,
+                "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                "receipt": {
+                    "customer": {"email": "user@example.com"},
+                    "items": [{
+                        "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                        "quantity": "1",
+                        "amount": {"value": f"{price}.00", "currency": "RUB"},
+                        "vat_code": 1
+                    }]
+                },
+                "metadata": {"user_id": user_id}
+            }, str(uuid.uuid4()))
+
+        payment = await asyncio.to_thread(create_payment_sync)
+
+        if payment is None:
+            raise Exception("Не удалось создать платеж - получен пустой ответ от сервера")
+
+        logging.info(f"Платеж создан: {payment.id}, сумма: {price}")
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                'INSERT INTO payments (user_id, payment_id, amount, status, created_at) VALUES (?, ?, ?, ?, ?)',
+                (user_id, payment.id, price, 'pending', int(datetime.now().timestamp()))
+            )
+            await db.commit()
+
+        buttons = [[InlineKeyboardButton(text="💳 Оплатить", url=payment.confirmation.confirmation_url)]]
+
+        logging.info(f"Отправляю сообщение с кнопкой оплаты пользователю {user_id}")
+
+        await callback.message.answer(
+            f"💰 Счет на оплату создан!\n\nСумма: {price} ₽\nНажмите кнопку ниже для оплаты:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+
+        await callback.message.answer("⬆️ Нажмите на кнопку оплаты выше", reply_markup=keyboard)
+
+        logging.info(f"Сообщения отправлены пользователю {user_id}")
+
+        asyncio.create_task(check_payment(payment.id, user_id))
+
+    except Exception as e:
+        logging.error(f"Ошибка создания платежа: {e}")
+        await callback.message.answer("❌ Ошибка создания платежа. Попробуйте позже.", reply_markup=keyboard)
+
+    await state.clear()
     await callback.answer()
 
 # ======================== МЕНЮ ========================
@@ -2524,11 +2578,65 @@ async def pay_button(message: Message):
 
 @router.callback_query(F.data == "tariff_1")
 async def tariff_1_callback(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer(
-        "📱 Для отслеживания подписки отправь свой номер телефона:",
-        reply_markup=phone_kb()
-    )
-    await state.set_state(PhoneState.waiting_phone)
+    user_id = callback.from_user.id
+    keyboard = main_kb(is_admin(user_id))
+    price = await get_user_price(user_id)
+
+    try:
+        logging.info(f"Создаю платеж для {user_id}...")
+
+        def create_payment_sync():
+            return Payment.create({
+                "amount": {"value": f"{price}.00", "currency": "RUB"},
+                "confirmation": {"type": "redirect", "return_url": f"https://t.me/djfkjf_bot"},
+                "capture": True,
+                "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                "receipt": {
+                    "customer": {"email": "user@example.com"},
+                    "items": [{
+                        "description": "Подписка на 1 месяц - Кафедра любительского спорта",
+                        "quantity": "1",
+                        "amount": {"value": f"{price}.00", "currency": "RUB"},
+                        "vat_code": 1
+                    }]
+                },
+                "metadata": {"user_id": user_id}
+            }, str(uuid.uuid4()))
+
+        payment = await asyncio.to_thread(create_payment_sync)
+
+        if payment is None:
+            raise Exception("Не удалось создать платеж - получен пустой ответ от сервера")
+
+        logging.info(f"Платеж создан: {payment.id}, сумма: {price}")
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                'INSERT INTO payments (user_id, payment_id, amount, status, created_at) VALUES (?, ?, ?, ?, ?)',
+                (user_id, payment.id, price, 'pending', int(datetime.now().timestamp()))
+            )
+            await db.commit()
+
+        buttons = [[InlineKeyboardButton(text="💳 Оплатить", url=payment.confirmation.confirmation_url)]]
+
+        logging.info(f"Отправляю сообщение с кнопкой оплаты пользователю {user_id}")
+
+        await callback.message.answer(
+            f"💰 Счет на оплату создан!\n\nСумма: {price} ₽\nНажмите кнопку ниже для оплаты:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+
+        await callback.message.answer("⬆️ Нажмите на кнопку оплаты выше", reply_markup=keyboard)
+
+        logging.info(f"Сообщения отправлены пользователю {user_id}")
+
+        asyncio.create_task(check_payment(payment.id, user_id))
+
+    except Exception as e:
+        logging.error(f"Ошибка создания платежа: {e}")
+        await callback.message.answer("❌ Ошибка создания платежа. Попробуйте позже.", reply_markup=keyboard)
+
+    await state.clear()
     await callback.answer()
 
 @router.message(PhoneState.waiting_phone, F.contact)
